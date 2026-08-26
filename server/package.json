@@ -1,0 +1,16 @@
+{
+  "name": "lightstock-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "轻进销存 LightStock 后端",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node test/smoke.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.4.1",
+    "express": "^4.21.2",
+    "xlsx": "^0.18.5"
+  }
+}
