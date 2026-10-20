@@ -48,6 +48,52 @@ function orderDetail(kind) {
   };
 }
 
+// 开单提速用：某个往来单位的常卖商品 + 上次成交价。
+// 不传 partnerId 时退化为「全店最近卖过的商品」，新客户第一次开单也有东西可点。
+router.get('/order-suggest', (req, res) => {
+  const kind = req.query.kind === 'purchase' ? 'purchase' : 'sales';
+  const orderTable = kind === 'purchase' ? 'purchase_orders' : 'sales_orders';
+  const itemTable = kind === 'purchase' ? 'purchase_order_items' : 'sales_order_items';
+  const partnerCol = kind === 'purchase' ? 'supplier_id' : 'customer_id';
+  const partnerId = String(req.query.partnerId || '');
+
+  // 按该往来单位的出现频次排序；并列时看最近一次的时间
+  const frequent = db.prepare(`
+    SELECT i.product_id, p.name, p.spec, p.base_unit_id, u.name AS unit_name,
+      COUNT(DISTINCT o.id) AS order_count,
+      ROUND(SUM(i.quantity_base), 3) AS total_qty,
+      MAX(o.order_date) AS last_date
+    FROM ${itemTable} i
+    JOIN ${orderTable} o ON o.id=i.order_id
+    JOIN products p ON p.id=i.product_id AND p.active=1
+    LEFT JOIN units u ON u.id=p.base_unit_id
+    WHERE o.status='done' AND (?='' OR o.${partnerCol}=?)
+    GROUP BY i.product_id
+    ORDER BY order_count DESC, last_date DESC
+    LIMIT 30`).all(partnerId, partnerId);
+
+  // 每个商品在该往来单位名下的最后一次成交价与单位，用于带出历史价
+  const lastRows = db.prepare(`
+    SELECT product_id, unit_price, unit_id FROM (
+      SELECT i.product_id, i.unit_price, i.unit_id,
+        ROW_NUMBER() OVER (PARTITION BY i.product_id ORDER BY o.order_date DESC, o.id DESC) AS rn
+      FROM ${itemTable} i JOIN ${orderTable} o ON o.id=i.order_id
+      WHERE o.status='done' AND (?='' OR o.${partnerCol}=?)
+    ) WHERE rn=1`).all(partnerId, partnerId);
+  const lastMap = new Map(lastRows.map(r => [r.product_id, r]));
+
+  res.json({
+    products: frequent.map(r => {
+      const last = lastMap.get(r.product_id);
+      return {
+        ...r,
+        last_price: last ? last.unit_price : null,
+        last_unit_id: last ? last.unit_id : null
+      };
+    })
+  });
+});
+
 router.get('/purchase-orders', orderList('purchase'));
 router.get('/purchase-orders/:id', orderDetail('purchase'));
 router.post('/purchase-orders', (req, res) => {

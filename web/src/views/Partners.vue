@@ -24,7 +24,7 @@
         <el-form-item label="电话"><el-input v-model="form.phone" /></el-form-item>
         <el-form-item label="地址"><el-input v-model="form.address" /></el-form-item>
         <el-form-item label="备注"><el-input v-model="form.remark" type="textarea" /></el-form-item>
-        <CustomFields :entity="entity" :model="form.custom_data" />
+        <CustomFields v-if="!isSimple" :entity="entity" :model="form.custom_data" />
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
@@ -39,6 +39,7 @@ import { computed, onMounted, reactive, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import api from '../api';
 import CustomFields from '../components/CustomFields.vue';
+import { isSimple } from '../mode';
 
 const props = defineProps({ kind: { type: String, default: 'suppliers' } });
 const entity = computed(() => props.kind === 'suppliers' ? 'supplier' : 'customer');

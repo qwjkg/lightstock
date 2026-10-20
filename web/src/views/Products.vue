@@ -20,7 +20,7 @@
       <el-table-column prop="spec" label="规格" width="110" show-overflow-tooltip />
       <el-table-column prop="sku" label="编号" width="100" />
       <el-table-column prop="barcode" label="条码" width="120" />
-      <el-table-column prop="unit_name" label="基准单位" width="90" />
+      <el-table-column v-if="!isSimple" prop="unit_name" label="基准单位" width="90" />
       <el-table-column label="库存" width="110">
         <template #default="{ row }">
           <span :style="{ color: isLow(row) ? '#f56c6c' : 'inherit', fontWeight: isLow(row) ? 700 : 400 }">
@@ -28,13 +28,13 @@
           </span>
         </template>
       </el-table-column>
-      <el-table-column label="折算" width="120">
+      <el-table-column v-if="!isSimple" label="折算" width="120">
         <template #default="{ row }">{{ convertText(row) }}</template>
       </el-table-column>
-      <el-table-column prop="weight_per_base_kg" label="重量kg/基准" width="110" />
+      <el-table-column v-if="!isSimple" prop="weight_per_base_kg" label="重量kg/基准" width="110" />
       <el-table-column prop="purchase_price" label="默认进价" width="90" />
       <el-table-column prop="sale_price" label="默认售价" width="90" />
-      <el-table-column label="平均成本" width="90">
+      <el-table-column v-if="!isSimple" label="平均成本" width="90">
         <template #default="{ row }">{{ (row.avg_cost || 0).toFixed(2) }}</template>
       </el-table-column>
       <el-table-column label="操作" width="150" fixed="right">
@@ -50,24 +50,33 @@
         <el-form-item label="名称" required><el-input v-model="form.name" /></el-form-item>
         <el-row :gutter="10">
           <el-col :span="12"><el-form-item label="分类"><el-input v-model="form.category" placeholder="如：饮品/食品" /></el-form-item></el-col>
-          <el-col :span="12"><el-form-item label="规格"><el-input v-model="form.spec" placeholder="如：550ml" /></el-form-item></el-col>
-          <el-col :span="12"><el-form-item label="编号"><el-input v-model="form.sku" /></el-form-item></el-col>
-          <el-col :span="12"><el-form-item label="条码"><el-input v-model="form.barcode" /></el-form-item></el-col>
-          <el-col :span="12">
-            <el-form-item label="基准单位" required>
-              <el-select v-model="form.base_unit_id" placeholder="选择单位" style="width:100%">
-                <el-option v-for="u in countUnits" :key="u.id" :label="u.name" :value="u.id" />
-              </el-select>
-            </el-form-item>
-          </el-col>
-          <el-col :span="12"><el-form-item label="重量kg/基准"><el-input-number v-model="form.weight_per_base_kg" :controls="false" style="width:100%" /></el-form-item></el-col>
+          <template v-if="!isSimple || showMore">
+            <el-col :span="12"><el-form-item label="规格"><el-input v-model="form.spec" placeholder="如：550ml" /></el-form-item></el-col>
+            <el-col :span="12"><el-form-item label="编号"><el-input v-model="form.sku" /></el-form-item></el-col>
+            <el-col :span="12"><el-form-item label="条码"><el-input v-model="form.barcode" /></el-form-item></el-col>
+          </template>
+          <template v-if="!isSimple">
+            <el-col :span="12">
+              <el-form-item label="基准单位" required>
+                <el-select v-model="form.base_unit_id" placeholder="选择单位" style="width:100%">
+                  <el-option v-for="u in countUnits" :key="u.id" :label="u.name" :value="u.id" />
+                </el-select>
+              </el-form-item>
+            </el-col>
+            <el-col :span="12"><el-form-item label="重量kg/基准"><el-input-number v-model="form.weight_per_base_kg" :controls="false" style="width:100%" /></el-form-item></el-col>
+          </template>
           <el-col :span="8"><el-form-item label="默认进价"><el-input-number v-model="form.purchase_price" :controls="false" style="width:100%" /></el-form-item></el-col>
           <el-col :span="8"><el-form-item label="默认售价"><el-input-number v-model="form.sale_price" :controls="false" style="width:100%" /></el-form-item></el-col>
           <el-col :span="8"><el-form-item label="低库存阈值"><el-input-number v-model="form.stock_low" :controls="false" style="width:100%" /></el-form-item></el-col>
         </el-row>
+        <el-form-item v-if="isSimple && !showMore">
+          <el-button link type="primary" @click="showMore = true">+ 更多字段（规格 / 编号 / 条码）</el-button>
+        </el-form-item>
         <el-form-item label="备注"><el-input v-model="form.remark" type="textarea" /></el-form-item>
-        <el-divider content-position="left">自定义字段</el-divider>
-        <CustomFields entity="product" :model="form.custom_data" />
+        <template v-if="!isSimple">
+          <el-divider content-position="left">自定义字段</el-divider>
+          <CustomFields entity="product" :model="form.custom_data" />
+        </template>
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
@@ -83,15 +92,19 @@ import { ElMessage, ElMessageBox } from 'element-plus';
 import * as XLSX from 'xlsx';
 import api, { downloadFile } from '../api';
 import CustomFields from '../components/CustomFields.vue';
+import { isSimple } from '../mode';
 
 const rows = ref([]);
 const categories = ref([]);
 const units = ref([]);
+const showMore = ref(false);
 const query = reactive({ keyword: '', category: '' });
 const dialogVisible = ref(false);
 const form = reactive({ id: null, name: '', sku: '', barcode: '', category: '', spec: '', base_unit_id: null, weight_per_base_kg: 0, purchase_price: 0, sale_price: 0, stock_low: 0, remark: '', custom_data: {} });
 
 const countUnits = computed(() => units.value.filter(u => u.dimension === 'count' && u.active));
+// 简易模式隐藏了「基准单位」下拉，统一落到默认的数量基准单位（即「件」）
+const defaultUnitId = computed(() => units.value.find(u => u.dimension === 'count' && u.is_base)?.id ?? countUnits.value[0]?.id ?? null);
 
 async function load() {
   const [p, c, u] = await Promise.all([
@@ -102,12 +115,15 @@ async function load() {
   rows.value = p; categories.value = c; units.value = u;
 }
 function openDialog(row) {
+  showMore.value = false;
   Object.assign(form, row ? { ...row, custom_data: JSON.parse(row.custom_data || '{}') }
-    : { id: null, name: '', sku: '', barcode: '', category: '', spec: '', base_unit_id: countUnits.value[0]?.id ?? null, weight_per_base_kg: 0, purchase_price: 0, sale_price: 0, stock_low: 0, remark: '', custom_data: {} });
+    : { id: null, name: '', sku: '', barcode: '', category: '', spec: '', base_unit_id: defaultUnitId.value, weight_per_base_kg: 0, purchase_price: 0, sale_price: 0, stock_low: 0, remark: '', custom_data: {} });
   dialogVisible.value = true;
 }
 async function save() {
   if (!form.name) return ElMessage.warning('请输入商品名称');
+  // 简易模式没有基准单位下拉，用默认单位兜底，否则这条校验会让表单永远存不上
+  if (isSimple.value && !form.base_unit_id) form.base_unit_id = defaultUnitId.value;
   if (!form.base_unit_id) return ElMessage.warning('请选择基准单位');
   if (form.id) await api.put('/products/' + form.id, form);
   else await api.post('/products', form);

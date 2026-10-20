@@ -26,9 +26,10 @@
           </template>
         </el-table-column>
         <el-table-column prop="remark" label="备注" min-width="120" show-overflow-tooltip />
-        <el-table-column label="操作" width="160" fixed="right">
+        <el-table-column label="操作" width="215" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="openDetail(row)">查看</el-button>
+            <el-button link type="primary" @click="copyFrom(row)">再来一单</el-button>
             <el-button v-if="row.status === 'done'" link type="danger" @click="voidOrder(row)">作废</el-button>
           </template>
         </el-table-column>
@@ -63,7 +64,15 @@
           </el-col>
         </el-row>
         <el-form-item label="备注"><el-input v-model="draft.remark" /></el-form-item>
-        <el-divider content-position="left">商品明细（数量按所选单位录入，系统自动折算基准单位）</el-divider>
+        <el-divider content-position="left">{{ isSimple ? '商品明细' : '商品明细（数量按所选单位录入，系统自动折算基准单位）' }}</el-divider>
+        <div class="quick-picks" v-if="suggest.length">
+          <span class="qp-label">{{ draft.partner_id ? '常卖' : '最近卖过' }}</span>
+          <el-tag v-for="s in suggest.slice(0, 12)" :key="s.product_id" class="qp-tag"
+                  effect="plain" @click="addSuggested(s)">
+            {{ s.name }}<span v-if="s.last_price" class="qp-price">{{ s.last_price }}</span>
+          </el-tag>
+          <span class="qp-hint">点一下直接加一行</span>
+        </div>
         <el-table :data="draft.items" border size="small">
           <el-table-column label="商品" min-width="200">
             <template #default="{ row }">
@@ -72,7 +81,7 @@
               </el-select>
             </template>
           </el-table-column>
-          <el-table-column label="单位" width="100">
+          <el-table-column v-if="!isSimple" label="单位" width="100">
             <template #default="{ row }">
               <el-select v-model="row.unit_id" style="width:100%">
                 <el-option v-for="u in countUnits" :key="u.id" :label="u.name" :value="u.id" />
@@ -88,7 +97,7 @@
           <el-table-column label="金额" width="110">
             <template #default="{ row }">{{ lineAmount(row) }}</template>
           </el-table-column>
-          <el-table-column label="重量kg" width="90">
+          <el-table-column v-if="!isSimple" label="重量kg" width="90">
             <template #default="{ row }">{{ lineWeight(row) }}</template>
           </el-table-column>
           <el-table-column width="60">
@@ -97,9 +106,9 @@
         </el-table>
         <el-button style="margin-top:10px" @click="addLine">+ 添加明细</el-button>
         <div class="total-bar">
-          <span>合计：<b>{{ totalAmount }}</b> 元　|　总重：<b>{{ totalWeight }}</b> kg</span>
+          <span>合计：<b>{{ totalAmount }}</b> 元<template v-if="!isSimple">　|　总重：<b>{{ totalWeight }}</b> kg</template></span>
         </div>
-        <CustomFields :entity="kind === 'purchase' ? 'purchase_order' : 'sales_order'" :model="draft.custom_data" />
+        <CustomFields v-if="!isSimple" :entity="kind === 'purchase' ? 'purchase_order' : 'sales_order'" :model="draft.custom_data" />
       </el-form>
       <template #footer>
         <el-button @click="createVisible = false">取消</el-button>
@@ -150,10 +159,11 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import api from '../api';
 import CustomFields from '../components/CustomFields.vue';
+import { isSimple } from '../mode';
 
 const props = defineProps({ kind: { type: String, default: 'purchase' } });
 const kindText = computed(() => props.kind === 'purchase' ? '进货' : '出货');
@@ -176,8 +186,12 @@ const draft = reactive(emptyDraft());
 const quickVisible = ref(false);
 const quickSaving = ref(false);
 const quick = reactive({ name: '', contact: '', phone: '', address: '', remark: '' });
+const suggest = ref([]);   // 该往来单位的常卖商品（未选往来单位时是全店最近卖过的）
+const suggestMap = computed(() => new Map(suggest.value.map(s => [s.product_id, s])));
 
 const countUnits = computed(() => units.value.filter(u => u.dimension === 'count' && u.active));
+// 简易模式不显示单位选择，明细一律按商品基准单位录入
+const defaultUnitId = computed(() => units.value.find(u => u.dimension === 'count' && u.is_base)?.id ?? countUnits.value[0]?.id ?? null);
 
 function emptyDraft() {
   return {
@@ -217,16 +231,64 @@ async function loadRefs() {
   const [p, u] = await Promise.all([api.get('/products'), api.get('/units')]);
   products.value = p; units.value = u;
 }
+async function loadSuggest() {
+  try {
+    const r = await api.get('/order-suggest', {
+      params: { kind: props.kind, partnerId: draft.partner_id || '' }
+    });
+    suggest.value = r.products || [];
+  } catch { suggest.value = []; }
+}
+// 换了往来单位就重新取他的常卖货与历史价
+watch(() => draft.partner_id, () => { if (createVisible.value) loadSuggest(); });
 function openCreate() {
   Object.assign(draft, emptyDraft());
+  // 只有一个仓库时直接选好，省掉每单都要点一次的下拉
+  if (warehouses.value.length === 1) draft.warehouse_id = warehouses.value[0].id;
   createVisible.value = true;
   loadRefs();
+  loadSuggest();
+}
+// 再来一单：把历史单据的明细、数量、单价整套搬进草稿
+async function copyFrom(row) {
+  const d = await api.get(baseUrl.value + '/' + row.id);
+  Object.assign(draft, emptyDraft());
+  draft.partner_id = props.kind === 'purchase' ? d.supplier_id : d.customer_id;
+  draft.warehouse_id = d.warehouse_id;
+  draft.items = (d.items || []).map(i => ({
+    product_id: i.product_id, unit_id: i.unit_id, quantity: i.quantity, unit_price: i.unit_price
+  }));
+  if (!draft.items.length) draft.items = [{ product_id: null, unit_id: null, quantity: 1, unit_price: 0 }];
+  createVisible.value = true;
+  loadRefs();
+  loadSuggest();
+}
+function addSuggested(s) {
+  // 优先填进已有的空行，免得每点一下就多留一行空白
+  let line = draft.items.find(r => !r.product_id);
+  if (!line) {
+    draft.items.push({ product_id: null, unit_id: null, quantity: 1, unit_price: 0 });
+    line = draft.items[draft.items.length - 1];
+  }
+  const p = products.value.find(x => x.id === s.product_id);
+  line.product_id = s.product_id;
+  line.unit_id = s.last_unit_id ?? s.base_unit_id ?? defaultUnitId.value;
+  line.quantity = 1;
+  line.unit_price = s.last_price != null
+    ? s.last_price
+    : (props.kind === 'purchase' ? (p?.purchase_price ?? 0) : (p?.sale_price ?? 0));
 }
 function addLine() { draft.items.push({ product_id: null, unit_id: null, quantity: 1, unit_price: 0 }); }
 function onProductChange(row) {
   const p = products.value.find(x => x.id === row.product_id);
   row.unit_id = p?.base_unit_id ?? null;
-  if (p && !row.unit_price) row.unit_price = props.kind === 'purchase' ? p.purchase_price : p.sale_price;
+  if (p && !row.unit_price) {
+    // 老客户优先带出上次成交价，没有记录才用商品默认价
+    const s = suggestMap.value.get(row.product_id);
+    row.unit_price = s && s.last_price != null
+      ? s.last_price
+      : (props.kind === 'purchase' ? p.purchase_price : p.sale_price);
+  }
 }
 function lineAmount(row) {
   return ((Number(row.quantity) || 0) * (Number(row.unit_price) || 0)).toFixed(2);
@@ -246,6 +308,8 @@ async function submit() {
   const items = draft.items.filter(r => r.product_id);
   if (!items.length) return ElMessage.warning('请至少添加一条商品明细');
   for (const r of items) {
+    // 简易模式没有单位下拉，商品若未设基准单位就用默认单位兜底
+    if (isSimple.value && !r.unit_id) r.unit_id = defaultUnitId.value;
     if (!r.unit_id) return ElMessage.warning('请为每条明细选择单位');
     if (!(Number(r.quantity) > 0)) return ElMessage.warning('数量必须大于 0');
   }
@@ -269,8 +333,19 @@ async function openDetail(row) {
 }
 async function voidOrder(row) {
   await ElMessageBox.confirm(`确定作废单号 ${row.order_no} 吗？库存将自动冲回。`, '作废确认', { type: 'warning' });
-  await api.post(baseUrl.value + '/' + row.id + '/void');
-  ElMessage.success('已作废'); load();
+  const r = await api.post(baseUrl.value + '/' + row.id + '/void');
+  // 作废一张货已售出的采购单，会把库存压成负数。负数本身是如实记账，
+  // 但必须让用户看见并去补齐，否则等于换种方式把账面缺口藏起来。
+  if (r.negative && r.negative.length) {
+    await ElMessageBox.alert(
+      `作废后下列商品库存变为负数，说明这批货在作废前已经卖出：${r.negative.map(n => `${n.name} ${n.quantity}`).join('、')}。请到「库存」页做一次库存修正补齐。`,
+      '作废成功，但库存出现负数',
+      { type: 'warning', confirmButtonText: '知道了' }
+    );
+  } else {
+    ElMessage.success('已作废');
+  }
+  load();
 }
 onMounted(load);
 </script>
@@ -278,4 +353,10 @@ onMounted(load);
 <style scoped>
 .toolbar { display: flex; gap: 8px; margin-bottom: 12px; }
 .total-bar { margin-top: 10px; background: #f5f7fa; padding: 8px 12px; border-radius: 4px; font-size: 14px; }
+.quick-picks { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: -4px 0 10px; }
+.qp-label { font-size: 12px; color: #909399; }
+.qp-tag { cursor: pointer; }
+.qp-tag:hover { background: #ecf5ff; border-color: #409eff; color: #409eff; }
+.qp-price { color: #e6a23c; margin-left: 4px; }
+.qp-hint { font-size: 12px; color: #c0c4cc; }
 </style>

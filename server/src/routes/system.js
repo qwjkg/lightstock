@@ -11,13 +11,20 @@ router.get('/settings', (req, res) => {
   res.json({
     business_name: getSetting('business_name', '我的店铺'),
     auto_backup_hours: Number(getSetting('auto_backup_hours', '6')),
-    password_required: !!getSetting('access_password')
+    password_required: !!getSetting('access_password'),
+    // ui_mode / onboarded 由 db.js 在启动时一次性落定，这里只读。
+    // 曾经这里按「库里有没有业务数据」现算，导致用户录入第一个商品时界面自己变模式。
+    ui_mode: getSetting('ui_mode', 'simple'),
+    onboarded: getSetting('onboarded', '1') === '1',
+    has_demo: !!getSetting('demo_seed_ids', '')
   });
 });
 router.put('/settings', (req, res) => {
   const b = req.body || {};
   if (b.business_name !== undefined) setSetting('business_name', b.business_name);
   if (b.auto_backup_hours !== undefined) setSetting('auto_backup_hours', Number(b.auto_backup_hours) || 6);
+  if (b.ui_mode !== undefined) setSetting('ui_mode', b.ui_mode === 'advanced' ? 'advanced' : 'simple');
+  if (b.onboarded !== undefined) setSetting('onboarded', b.onboarded ? '1' : '0');
   if (b.access_password !== undefined) {
     setSetting('access_password', b.access_password ? String(b.access_password) : '');
     resetTokens();

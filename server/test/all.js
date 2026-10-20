@@ -17,6 +17,17 @@ function check(name, cond, extra = '') {
   else { RESULT.fail.push(name); console.log(`  ✘ ${name} ${extra}`); }
 }
 
+// 进销存的基本恒等式：某商品在某仓库的当前库存，
+// 必须等于它全部流水变动量之和。旧实现会在库存将要变负时把行删掉，
+// 这条等式就会破——它是「账实不符」最直接的探测器。
+async function checkStockEqualsLedger(prodId, whId, label) {
+  const st = await api('GET', `/api/stock?productId=${prodId}&warehouseId=${whId}`);
+  const led = await api('GET', `/api/ledger?productId=${prodId}&warehouseId=${whId}`);
+  const qty = st.data.length ? st.data[0].quantity : 0;
+  const sum = Math.round(led.data.reduce((s, r) => s + r.change_qty, 0) * 1e6) / 1e6;
+  check(`${label}：库存=流水累计 (${qty})`, Math.abs(qty - sum) < 1e-6, `stock=${qty}, ledger累计=${sum}`);
+}
+
 async function api(method, url, body, token, raw = false) {
   const headers = { 'Content-Type': 'application/json' };
   if (token) headers.Authorization = 'Bearer ' + token;
@@ -56,6 +67,11 @@ try {
   const xiang = r.data.find(u => u.name === '箱');
   check('单位: 件/箱存在', !!(jian && xiang));
   check('单位: 箱折算=24', xiang && xiang.ratio === 24, JSON.stringify(xiang));
+  // 香料、干货铺子按斤卖是刚需，默认单位表里必须有
+  const jin = r.data.find(u => u.name === '斤');
+  check('单位: 斤存在且折算=0.5公斤', jin && jin.ratio === 0.5 && jin.dimension === 'weight', JSON.stringify(jin));
+  const unitOrder = r.data.map(u => u.name);
+  check('单位顺序: 斤紧跟公斤之后', unitOrder.indexOf('斤') === unitOrder.indexOf('公斤') + 1, JSON.stringify(unitOrder));
 
   r = await api('POST', '/api/units', { name: '袋', dimension: 'count', ratio: 5, weight_per: 1, sort_order: 99 });
   check('新增单位', r.status === 200 && r.data.id > 0, JSON.stringify(r.data));
@@ -224,10 +240,19 @@ try {
   check('流水按日期过滤', r.data.length >= 2);
 
   // ---------- 作废与成本 ----------
+  // 此时已进 120、卖出 30，库存 90。作废这张采购单意味着这 120 件从未入库，
+  // 但其中 30 件已经卖掉了，所以真实库存是 90-120 = -30。
+  // 新版如实保留负数（旧的写法会夹成 0，把账面缺口悄悄抹平）。
   r = await api('POST', `/api/purchase-orders/${poId}/void`);
   check('作废采购单', r.status === 200);
+  check('作废返回负数库存明细（供界面提示）',
+    Array.isArray(r.data.negative) && r.data.negative.length === 1
+    && r.data.negative[0].product_id === prodId && r.data.negative[0].quantity === -30,
+    JSON.stringify(r.data));
   r = await api('GET', '/api/stock');
-  check('作废采购后库存=0', !r.data.find(s => s.product_id === prodId));
+  const sVoid = r.data.find(s => s.product_id === prodId);
+  check('作废采购后库存=-30（负数如实保留，不再夹成0）', sVoid && sVoid.quantity === -30, JSON.stringify(sVoid));
+  await checkStockEqualsLedger(prodId, whId, '作废采购后');
   r = await api('GET', '/api/products');
   const avgAfterVoid = r.data.find(p => p.id === prodId).avg_cost;
   check('作废采购后平均成本=0', avgAfterVoid === 0, `实际 avg_cost=${avgAfterVoid}（BUG：成本未冲销）`);
@@ -235,6 +260,7 @@ try {
   check('重复作废拒绝', r.status === 400);
 
   // 重新采购，然后作废销售单验证库存回补
+  // 从 -30 起：-30 +120 = 90，卖 30 后 60，作废该销售单回补到 90
   r = await api('POST', '/api/purchase-orders', {
     supplier_id: supId, warehouse_id: whId, order_date: todayStr,
     items: [{ product_id: prodId, unit_id: xiang.id, quantity: 5, unit_price: 22 }]
@@ -247,8 +273,11 @@ try {
   const so2 = r.data.id;
   r = await api('POST', `/api/sales-orders/${so2}/void`);
   check('作废销售单', r.status === 200);
+  check('作废销售单不产生负库存提示', Array.isArray(r.data.negative) && r.data.negative.length === 0, JSON.stringify(r.data));
   r = await api('GET', '/api/stock');
-  check('作废销售后库存回补=120', r.data.find(s => s.product_id === prodId).quantity === 120);
+  check('作废销售后库存回补=90', r.data.find(s => s.product_id === prodId).quantity === 90,
+    JSON.stringify(r.data.find(s => s.product_id === prodId)));
+  await checkStockEqualsLedger(prodId, whId, '作废销售后');
 
   // 超卖场景（记录当前行为）
   r = await api('POST', '/api/sales-orders', {
@@ -259,17 +288,118 @@ try {
   r = await api('GET', '/api/stock');
   const stockAfterOverSell = r.data.find(s => s.product_id === prodId);
   check('超卖被拦截(期望400)', overSellStatus === 400, `实际 status=${overSellStatus}`);
-  check('超卖被拦截后库存不变=120', stockAfterOverSell && stockAfterOverSell.quantity === 120, JSON.stringify(stockAfterOverSell));
+  check('超卖被拦截后库存不变=90', stockAfterOverSell && stockAfterOverSell.quantity === 90, JSON.stringify(stockAfterOverSell));
 
   // ---------- 库存调整 ----------
   r = await api('POST', '/api/stock/adjust', { product_id: prodId, warehouse_id: whId, unit_id: jian.id, delta_qty: 50, remark: '盘点' });
   check('库存调整+50', r.status === 200);
   r = await api('GET', '/api/stock');
-  check('调整后库存=170', r.data.find(s => s.product_id === prodId)?.quantity === 170);
+  check('调整后库存=140', r.data.find(s => s.product_id === prodId)?.quantity === 140,
+    JSON.stringify(r.data.find(s => s.product_id === prodId)));
+  await checkStockEqualsLedger(prodId, whId, '库存调整后');
   r = await api('POST', '/api/stock/adjust', { product_id: prodId, warehouse_id: whId, unit_id: jian.id, delta_qty: 0 });
   check('调整为0拒绝', r.status === 400);
+  r = await api('POST', '/api/stock/adjust', { product_id: prodId, warehouse_id: whId, unit_id: jian.id, delta_qty: -500 });
+  check('盘点调减超出实存允许', r.status === 200, `实际 status=${r.status}`);
+  r = await api('GET', '/api/stock');
+  check('调减超出实存后库存=-360（如实保留负数）',
+    r.data.find(s => s.product_id === prodId)?.quantity === -360,
+    JSON.stringify(r.data.find(s => s.product_id === prodId)));
+  await checkStockEqualsLedger(prodId, whId, '调减超出实存后');
+  await api('POST', '/api/stock/adjust', { product_id: prodId, warehouse_id: whId, unit_id: jian.id, delta_qty: 360, remark: '复位' });
   r = await api('POST', '/api/stock/adjust', { product_id: prodId, warehouse_id: 999999, unit_id: jian.id, delta_qty: 10 });
   check('调整到不存在仓库被拒绝', r.status === 400, `实际 status=${r.status}（BUG：可写孤立库存行）`);
+
+  // ---------- 移动加权平均成本（本次改动的核心回归）----------
+  // 旧算法是「全历史采购总额 ÷ 全历史采购数量」，等于把已经卖出那部分货物的
+  // 历史采购成本一直留在分母里。香料价格波动大，这个偏差会直接算进毛利。
+  const huajiao = await api('POST', '/api/products', {
+    name: '花椒', category: '香料', base_unit_id: jian.id, purchase_price: 10, sale_price: 15
+  });
+  const hjId = huajiao.data.id;
+  // 进 100 @10 → 卖 50（均价 10，结转成本 500）→ 再进 100 @20
+  // 正确：池 (150, 2500) → 均价 16.6667；旧算法：3000/200 = 15
+  await api('POST', '/api/purchase-orders', {
+    supplier_id: supId, warehouse_id: whId, order_date: todayStr,
+    items: [{ product_id: hjId, unit_id: jian.id, quantity: 100, unit_price: 10 }]
+  });
+  await api('POST', '/api/sales-orders', {
+    customer_id: cusId, warehouse_id: whId, order_date: todayStr,
+    items: [{ product_id: hjId, unit_id: jian.id, quantity: 50, unit_price: 15 }]
+  });
+  await api('POST', '/api/purchase-orders', {
+    supplier_id: supId, warehouse_id: whId, order_date: todayStr,
+    items: [{ product_id: hjId, unit_id: jian.id, quantity: 100, unit_price: 20 }]
+  });
+  r = await api('GET', '/api/products');
+  const hjAvg = r.data.find(p => p.id === hjId).avg_cost;
+  check('移动加权：卖一半后再涨价进货，均价=16.67（旧算法给15）',
+    Math.abs(hjAvg - 2500 / 150) < 0.001, `实际 avg_cost=${hjAvg}`);
+
+  // 出库必须按当时均价结转成本，否则毛利依然不对。
+  // 报表汇总该商品全部出库：第一笔 50 件按均价 10 结转 500，
+  // 第二笔 50 件必须按 16.67 结转 833.33（旧算法会按 15 结转 750）。
+  await api('POST', '/api/sales-orders', {
+    customer_id: cusId, warehouse_id: whId, order_date: todayStr,
+    items: [{ product_id: hjId, unit_id: jian.id, quantity: 50, unit_price: 30 }]
+  });
+  r = await api('GET', '/api/reports/profit?productId=' + hjId);
+  check('移动加权：第二笔出库按16.67结转，两笔成本合计1333.33',
+    Math.abs(r.data.total.cost - (500 + (2500 / 150) * 50)) < 0.05, JSON.stringify(r.data.total));
+  check('移动加权：毛利率不被虚高（40.74%而非44.4%）',
+    Math.abs(r.data.total.rate - 40.74) < 0.1, `实际 rate=${r.data.total.rate}`);
+  await checkStockEqualsLedger(hjId, whId, '香料场景');
+
+  // 卖光后再进货：成本池已归零，新进货价就是新均价
+  const bajiao = await api('POST', '/api/products', {
+    name: '八角', category: '香料', base_unit_id: jian.id, purchase_price: 10, sale_price: 15
+  });
+  const bjId = bajiao.data.id;
+  await api('POST', '/api/purchase-orders', {
+    supplier_id: supId, warehouse_id: whId, order_date: todayStr,
+    items: [{ product_id: bjId, unit_id: jian.id, quantity: 100, unit_price: 10 }]
+  });
+  await api('POST', '/api/sales-orders', {
+    customer_id: cusId, warehouse_id: whId, order_date: todayStr,
+    items: [{ product_id: bjId, unit_id: jian.id, quantity: 100, unit_price: 15 }]
+  });
+  await api('POST', '/api/purchase-orders', {
+    supplier_id: supId, warehouse_id: whId, order_date: todayStr,
+    items: [{ product_id: bjId, unit_id: jian.id, quantity: 100, unit_price: 20 }]
+  });
+  r = await api('GET', '/api/products');
+  const bjAvg = r.data.find(p => p.id === bjId).avg_cost;
+  check('移动加权：卖光后再进货，均价=20（旧算法给15）', Math.abs(bjAvg - 20) < 0.001, `实际 avg_cost=${bjAvg}`);
+
+  // ---------- 开单提速：常卖商品 / 历史价 ----------
+  r = await api('GET', `/api/order-suggest?kind=sales&partnerId=${cusId}`);
+  check('常卖商品接口可用', r.status === 200 && Array.isArray(r.data.products), JSON.stringify(r.data).slice(0, 120));
+  const sug = r.data.products;
+  check('常卖商品按该客户的成交频次降序',
+    sug.length >= 2 && sug[0].order_count >= sug[sug.length - 1].order_count,
+    JSON.stringify(sug.map(s => [s.name, s.order_count])));
+  const hjSug = sug.find(s => s.product_id === hjId);
+  check('带出该客户的上次成交价（花椒 30，而非商品默认售价15）',
+    hjSug && hjSug.last_price === 30, JSON.stringify(hjSug));
+  check('带出上次用的单位', hjSug && hjSug.last_unit_id === jian.id, JSON.stringify(hjSug));
+
+  r = await api('GET', '/api/order-suggest?kind=sales');
+  check('不传往来单位时退化为全店最近商品', r.status === 200 && r.data.products.length >= 2,
+    JSON.stringify(r.data.products.map(s => s.name)));
+
+  // 进货侧同样可用；停用的商品不应出现在常卖列表里
+  r = await api('POST', '/api/products', { name: '待停用品', base_unit_id: jian.id });
+  const tmpId = r.data.id;
+  await api('POST', '/api/purchase-orders', {
+    supplier_id: supId, warehouse_id: whId, order_date: todayStr,
+    items: [{ product_id: tmpId, unit_id: jian.id, quantity: 5, unit_price: 7 }]
+  });
+  r = await api('GET', `/api/order-suggest?kind=purchase&partnerId=${supId}`);
+  check('进货侧也能取常卖商品', r.data.products.some(s => s.product_id === tmpId), JSON.stringify(r.data.products.map(s => s.name)));
+  check('进货侧带出上次进价', (r.data.products.find(s => s.product_id === tmpId) || {}).last_price === 7);
+  await api('DELETE', '/api/products/' + tmpId);
+  r = await api('GET', `/api/order-suggest?kind=purchase&partnerId=${supId}`);
+  check('停用商品从常卖列表移除', !r.data.products.some(s => s.product_id === tmpId), JSON.stringify(r.data.products.map(s => s.name)));
 
   // ---------- 参数校验 ----------
   r = await api('POST', '/api/purchase-orders', { items: [] });

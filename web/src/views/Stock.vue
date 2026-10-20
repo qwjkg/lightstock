@@ -15,18 +15,18 @@
       <el-table-column prop="category" label="分类" width="100" />
       <el-table-column prop="spec" label="规格" width="100" show-overflow-tooltip />
       <el-table-column prop="warehouse_name" label="仓库" width="110" />
-      <el-table-column label="库存(基准)" width="110">
+      <el-table-column :label="isSimple ? '库存' : '库存(基准)'" width="110">
         <template #default="{ row }">
           <span :style="{ color: row.stock_low > 0 && row.quantity < row.stock_low ? '#f56c6c' : 'inherit', fontWeight: row.stock_low > 0 && row.quantity < row.stock_low ? 700 : 400 }">
             {{ row.quantity }} {{ row.unit_name }}{{ row.stock_low > 0 && row.quantity < row.stock_low ? ' ⚠' : '' }}
           </span>
         </template>
       </el-table-column>
-      <el-table-column label="折算" width="120">
+      <el-table-column v-if="!isSimple" label="折算" width="120">
         <template #default="{ row }">{{ convertText(row) }}</template>
       </el-table-column>
-      <el-table-column prop="weight_kg" label="重量(kg)" width="100" />
-      <el-table-column prop="avg_cost" label="平均成本" width="90" />
+      <el-table-column v-if="!isSimple" prop="weight_kg" label="重量(kg)" width="100" />
+      <el-table-column v-if="!isSimple" prop="avg_cost" label="平均成本" width="90" />
       <el-table-column prop="stock_value" label="库存金额" width="100" />
       <el-table-column prop="stock_low" label="预警阈值" width="90" />
       <el-table-column label="操作" width="110" fixed="right">
@@ -39,7 +39,7 @@
     <el-dialog v-model="adjustVisible" title="库存调整（盘点/修正）" width="460px">
       <el-form label-width="90px">
         <el-form-item label="商品"><b>{{ adjustRow.name }}</b>（{{ adjustRow.warehouse_name }}）</el-form-item>
-        <el-form-item label="调整单位">
+        <el-form-item v-if="!isSimple" label="调整单位">
           <el-select v-model="adjustForm.unit_id" style="width:100%">
             <el-option v-for="u in countUnits" :key="u.id" :label="u.name" :value="u.id" />
           </el-select>
@@ -61,6 +61,7 @@
 import { computed, onMounted, reactive, ref } from 'vue';
 import { ElMessage } from 'element-plus';
 import api, { downloadFile } from '../api';
+import { isSimple } from '../mode';
 
 const rows = ref([]);
 const warehouses = ref([]);
@@ -71,6 +72,7 @@ const adjustRow = ref({});
 const adjustForm = reactive({ unit_id: null, delta_qty: 0, remark: '' });
 
 const countUnits = computed(() => units.value.filter(u => u.dimension === 'count' && u.active));
+const defaultUnitId = computed(() => units.value.find(u => u.dimension === 'count' && u.is_base)?.id ?? countUnits.value[0]?.id ?? null);
 
 async function load() {
   const [s, w, u] = await Promise.all([api.get('/stock', { params: query }), api.get('/warehouses'), api.get('/units')]);
@@ -85,7 +87,7 @@ function convertText(row) {
 }
 function openAdjust(row) {
   adjustRow.value = row;
-  Object.assign(adjustForm, { unit_id: row.base_unit_id, delta_qty: 0, remark: '' });
+  Object.assign(adjustForm, { unit_id: row.base_unit_id ?? defaultUnitId.value, delta_qty: 0, remark: '' });
   adjustVisible.value = true;
 }
 async function submitAdjust() {

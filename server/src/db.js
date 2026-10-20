@@ -4,7 +4,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-export const dataDir = path.join(__dirname, '..', 'data');
+// 数据目录默认在 server/data。允许用环境变量指到别处：
+// 便于在含真实数据的机器上跑测试（test/*.js 会删库/写测试数据），
+// 也便于把账本放到别的盘或同步盘。
+export const dataDir = process.env.LIGHTSTOCK_DATA_DIR
+  ? path.resolve(process.env.LIGHTSTOCK_DATA_DIR)
+  : path.join(__dirname, '..', 'data');
 fs.mkdirSync(dataDir, { recursive: true });
 export const DB_PATH = path.join(dataDir, 'warehouse.db');
 
@@ -23,8 +28,17 @@ if (unitCount === 0) {
   ins.run('箱', 'count', 24, 0, 2);
   ins.run('打', 'count', 12, 0, 3);
   ins.run('公斤', 'weight', 1, 1, 4);
-  ins.run('克', 'weight', 0.001, 0, 5);
-  ins.run('吨', 'weight', 1000, 0, 6);
+  ins.run('斤', 'weight', 0.5, 0, 5);
+  ins.run('克', 'weight', 0.001, 0, 6);
+  ins.run('吨', 'weight', 1000, 0, 7);
+}
+// 「斤」是香料、干货铺子的常用计价单位，早期的默认单位表里没有，
+// 老库升级时补上。已经有同名单位（哪怕被停用）就不再插，
+// 免得用户特意删掉之后每次启动又被加回来。
+if (!db.prepare('SELECT 1 FROM units WHERE name=?').get('斤')) {
+  db.prepare('UPDATE units SET sort_order = sort_order + 1 WHERE sort_order >= ?').run(5);
+  db.prepare('INSERT INTO units (name, dimension, ratio, is_base, sort_order) VALUES (?,?,?,?,?)')
+    .run('斤', 'weight', 0.5, 0, 5);
 }
 const whCount = db.prepare('SELECT COUNT(*) AS c FROM warehouses').get().c;
 if (whCount === 0) {
@@ -37,6 +51,19 @@ if (stCount === 0) {
   ins.run('access_password', '');
   ins.run('auto_backup_hours', '6');
 }
+
+// 界面模式与引导状态只在这里一次性落定，之后不再随业务数据增减而变。
+// 注意：这两个键必须「选定即固化」。早期的写法是在 GET /settings 里按
+// 「库里有没有业务数据」现算，结果用户录入第一个商品时，界面会自己从
+// 简易模式跳成高级模式——正好抵消了简化这件事。空库默认简易，老库默认高级。
+function hasBusinessData() {
+  return db.prepare('SELECT COUNT(*) AS c FROM products').get().c > 0
+    || db.prepare('SELECT COUNT(*) AS c FROM purchase_orders').get().c > 0
+    || db.prepare('SELECT COUNT(*) AS c FROM sales_orders').get().c > 0;
+}
+const hasSetting = key => !!db.prepare('SELECT 1 FROM settings WHERE key=?').get(key);
+if (!hasSetting('ui_mode')) setSetting('ui_mode', hasBusinessData() ? 'advanced' : 'simple');
+if (!hasSetting('onboarded')) setSetting('onboarded', hasBusinessData() ? '1' : '0');
 
 export function getSetting(key, def = '') {
   const row = db.prepare('SELECT value FROM settings WHERE key=?').get(key);

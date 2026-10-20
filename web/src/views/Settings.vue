@@ -3,17 +3,35 @@
     <el-tab-pane label="基本设置" name="base">
       <el-form label-width="140px" style="max-width:520px">
         <el-form-item label="店铺/公司名称"><el-input v-model="form.business_name" /></el-form-item>
+        <el-form-item label="界面模式">
+          <el-radio-group v-model="uiMode">
+            <el-radio-button value="simple">简易</el-radio-button>
+            <el-radio-button value="advanced">高级</el-radio-button>
+          </el-radio-group>
+          <div class="tip">
+            简易模式只保留日常记账要用的功能（隐藏计量单位、自定义字段等），已录入的数据不受影响，随时可切回。
+          </div>
+        </el-form-item>
         <el-form-item label="自动备份间隔(小时)"><el-input-number v-model="form.auto_backup_hours" :min="1" /></el-form-item>
         <el-form-item label="访问密码">
           <el-input v-model="form.access_password" type="password" show-password placeholder="输入新密码可设置/修改；不修改请留空" @input="passwordDirty = true" />
           <el-checkbox v-if="passwordRequired && !passwordDirty" v-model="clearPassword" style="margin-top:6px">清除已设置的访问密码</el-checkbox>
         </el-form-item>
         <el-form-item><el-button type="primary" @click="saveBase">保存设置</el-button></el-form-item>
+        <el-form-item v-if="hasDemo" label="示例数据">
+          <el-button @click="clearDemo">清除示例数据</el-button>
+          <div class="tip">删除首次引导时添加的示例商品；已产生进出货记录的商品会保留并提示。</div>
+        </el-form-item>
       </el-form>
       <el-alert type="info" :closable="false" title="使用提示" description="本系统数据保存在 server/data/warehouse.db 单文件中，复制该文件即可整体备份；如需局域网/手机访问，直接在同一网络下用手机浏览器打开电脑 IP（服务启动时会显示）。" />
     </el-tab-pane>
 
-    <el-tab-pane label="自定义字段" name="fields">
+    <!-- 仓库：简易模式下收进设置页，高级模式仍保留独立菜单 -->
+    <el-tab-pane v-if="isSimple" label="仓库" name="warehouse">
+      <Warehouses />
+    </el-tab-pane>
+
+    <el-tab-pane v-if="!isSimple" label="自定义字段" name="fields">
       <div class="toolbar">
         <el-select v-model="fieldEntity" style="width:200px" @change="loadFields">
           <el-option v-for="e in entities" :key="e.value" :label="e.label" :value="e.value" />
@@ -95,7 +113,7 @@
       </el-upload>
     </el-tab-pane>
 
-    <el-tab-pane label="扩展路线" name="extend">
+    <el-tab-pane v-if="!isSimple" label="扩展路线" name="extend">
       <el-card shadow="never">
         <h3>Windows 桌面端 / 手机端扩展</h3>
         <p style="color:#606266;line-height:1.8">
@@ -113,16 +131,19 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue';
-import { ElMessage } from 'element-plus';
+import { onMounted, reactive, ref, watch } from 'vue';
+import { ElMessage, ElMessageBox } from 'element-plus';
 import * as XLSX from 'xlsx';
 import api, { downloadFile } from '../api';
+import { isSimple, mode, hasDemo, switchMode, setBusinessName } from '../mode';
+import Warehouses from './Warehouses.vue';
 
 const tab = ref('base');
 const form = reactive({ business_name: '', auto_backup_hours: 6, access_password: '' });
 const passwordDirty = ref(false);
 const clearPassword = ref(false);
 const passwordRequired = ref(false);
+const uiMode = ref(mode.value);
 
 const entities = [
   { value: 'product', label: '商品' },
@@ -146,12 +167,14 @@ async function loadBase() {
   passwordRequired.value = s.password_required;
   passwordDirty.value = false;
   clearPassword.value = false;
+  if (s.ui_mode !== uiMode.value) uiMode.value = s.ui_mode;
 }
 async function saveBase() {
   const body = { business_name: form.business_name, auto_backup_hours: form.auto_backup_hours };
   const pwChanged = passwordDirty.value || clearPassword.value;
   if (pwChanged) body.access_password = clearPassword.value ? '' : form.access_password;
   await api.put('/settings', body);
+  setBusinessName(body.business_name);   // 左上角 logo / 标签页立即跟着变
   if (pwChanged) {
     passwordRequired.value = !!body.access_password;
     form.access_password = '';
@@ -208,6 +231,29 @@ async function importProducts(file) {
 }
 
 onMounted(() => { loadBase(); loadFields(); loadBackups(); });
+
+// 模式切换：立即生效并持久化。若正停留在会被隐藏的页签上，先退回「基本设置」，
+// 否则页签被移除后内容区会空掉。
+watch(uiMode, async v => {
+  if (v === mode.value) return;
+  if (v === 'simple' && ['fields', 'extend'].includes(tab.value)) tab.value = 'base';
+  try {
+    await switchMode(v);
+    ElMessage.success(v === 'simple' ? '已切换到简易模式' : '已切换到高级模式');
+  } catch (e) {
+    ElMessage.error('切换失败：' + (e.response?.data?.error || e.message));
+  }
+});
+watch(mode, v => { if (uiMode.value !== v) uiMode.value = v; });
+
+async function clearDemo() {
+  await ElMessageBox.confirm('确定删除引导时添加的示例商品吗？已产生进出货记录的商品会自动保留。', '清除示例数据', { type: 'warning' });
+  const r = await api.post('/demo/clear');
+  ElMessage[r.kept ? 'warning' : 'success'](r.kept
+    ? `已删除 ${r.removed} 个示例商品，${r.kept} 个因已有进出货记录被保留`
+    : `已删除 ${r.removed} 个示例商品`);
+  hasDemo.value = (await api.get('/settings')).has_demo;
+}
 </script>
 
 <style scoped>.toolbar { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; } .tip { color: #909399; font-size: 12px; }</style>

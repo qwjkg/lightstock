@@ -10,6 +10,8 @@ import orderRoutes from './routes/orders.js';
 import stockRoutes from './routes/stock.js';
 import reportRoutes from './routes/reports.js';
 import systemRoutes, { createBackupFile } from './routes/system.js';
+import demoRoutes from './routes/demo.js';
+import { migrateCostV2 } from './migrate.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -39,6 +41,7 @@ app.use('/api', orderRoutes);
 app.use('/api', stockRoutes);
 app.use('/api', reportRoutes);
 app.use('/api', systemRoutes);
+app.use('/api', demoRoutes);
 
 // 托管前端构建产物
 const dist = path.join(__dirname, '..', '..', 'web', 'dist');
@@ -51,9 +54,22 @@ if (fs.existsSync(path.join(dist, 'index.html'))) {
 }
 
 const PORT = Number(process.env.PORT || 3000);
+
+// 成本算法一次性升级（幂等，跑过就跳过）。必须赶在 listen 之前同步完成：
+// 否则先到的请求会读到「一半新成本、一半旧成本」的中间状态。
+try {
+  const migrated = await migrateCostV2();
+  if (migrated) {
+    console.log(`[迁移] 成本算法已升级为移动加权平均：${migrated.products} 个商品，回填 ${migrated.ledgerRows} 条流水、${migrated.itemRows} 条销售明细`);
+    if (migrated.noCostSales) console.log(`[迁移] 注意：有 ${migrated.noCostSales} 笔出库当时无成本依据（该商品从未采购过），成本仍按 0 计`);
+  }
+} catch (err) {
+  console.error('[迁移] 成本算法升级失败，已保留原数据:', err.message);
+}
+
 app.listen(PORT, () => {
   console.log('==========================================');
-  console.log('  轻进销存 LightStock 已启动');
+  console.log('  LightStock 已启动');
   console.log(`  本机访问: http://localhost:${PORT}`);
   const nets = os.networkInterfaces();
   for (const name of Object.keys(nets)) {
