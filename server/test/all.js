@@ -42,11 +42,30 @@ async function api(method, url, body, token, raw = false) {
 }
 
 const server = spawn(process.execPath, ['src/index.js'], {
-  cwd: serverDir, stdio: 'ignore', env: { ...process.env, PORT: String(PORT) }
+  cwd: serverDir,
+  stdio: 'ignore',
+  env: { ...process.env, PORT: String(PORT), LIGHTSTOCK_DATA_DIR: path.join(serverDir, 'data') }
 });
+
+// 端口必须是空的：否则测试会连到「已经跑着的另一个服务」上，
+// 把测试数据写进那个服务的库。
+async function portAlreadyServing() {
+  try {
+    await fetch(`${BASE}/api/units`, { signal: AbortSignal.timeout(1500) });
+    return true;
+  } catch { return false; }
+}
+if (await portAlreadyServing()) {
+  console.error(`[安全保护] 端口 ${PORT} 上已经有服务在运行，请先停掉它或用 TEST_PORT 指定其他端口。`);
+  process.exit(3);
+}
+
+let serverExited = false;
+server.on('exit', () => { serverExited = true; });
 
 const waitReady = async () => {
   for (let i = 0; i < 60; i++) {
+    if (serverExited) return false;
     try {
       const r = await fetch(BASE + '/api/units');
       if (r.ok || r.status === 401) return true;
@@ -58,7 +77,9 @@ const waitReady = async () => {
 
 try {
   console.log('=== 轻进销存 综合测试（隔离库）===');
-  check('服务启动', await waitReady());
+  const ready = await waitReady();
+  check('服务启动', ready);
+  if (!ready) throw new Error(`服务未能启动（端口 ${PORT} 可能被占用）`);
 
   // ---------- 基础资料 ----------
   let r = await api('GET', '/api/units');
@@ -82,7 +103,13 @@ try {
   check('单位列表含新单位', r.data.some(u => u.name === '袋装'));
   await api('DELETE', '/api/units/' + daiId);
   r = await api('GET', '/api/units');
-  check('停用单位', r.data.find(u => u.id === daiId)?.active === 0);
+  check('停用单位后默认列表不含它', !r.data.some(u => u.id === daiId), JSON.stringify(r.data.map(u => u.name)));
+  r = await api('GET', '/api/units?includeInactive=1');
+  check('includeInactive 能看到停用单位', r.data.find(u => u.id === daiId)?.active === 0, JSON.stringify(r.data.find(u => u.id === daiId)));
+  r = await api('POST', `/api/units/${daiId}/restore`);
+  check('恢复停用单位', r.status === 200);
+  r = await api('GET', '/api/units');
+  check('恢复后重新出现在默认列表', r.data.some(u => u.id === daiId && u.active === 1));
 
   r = await api('GET', '/api/warehouses');
   check('默认仓库>=1', r.status === 200 && r.data.length >= 1, JSON.stringify(r.data));
@@ -401,6 +428,103 @@ try {
   r = await api('GET', `/api/order-suggest?kind=purchase&partnerId=${supId}`);
   check('停用商品从常卖列表移除', !r.data.products.some(s => s.product_id === tmpId), JSON.stringify(r.data.products.map(s => s.name)));
 
+  // ---------- 单据修改 ----------
+  r = await api('POST', '/api/products', { name: '改单测试品', base_unit_id: jian.id, purchase_price: 10, sale_price: 20 });
+  const epId = r.data.id;
+  r = await api('POST', '/api/purchase-orders', {
+    supplier_id: supId, warehouse_id: whId, order_date: todayStr,
+    items: [{ product_id: epId, unit_id: jian.id, quantity: 100, unit_price: 10 }]
+  });
+  const epoId = r.data.id;
+  r = await api('POST', '/api/sales-orders', {
+    customer_id: cusId, warehouse_id: whId, order_date: todayStr,
+    items: [{ product_id: epId, unit_id: jian.id, quantity: 20, unit_price: 20 }]
+  });
+  const esoId = r.data.id;
+
+  // 只改备注：不能写流水、不能重算成本
+  const ledBefore = (await api('GET', '/api/ledger?productId=' + epId)).data;
+  const avgBefore = (await api('GET', '/api/products')).data.find(p => p.id === epId).avg_cost;
+  r = await api('PUT', `/api/sales-orders/${esoId}`, {
+    customer_id: cusId, order_date: todayStr, remark: '只改备注',
+    items: [{ product_id: epId, unit_id: jian.id, quantity: 20, unit_price: 20 }]
+  });
+  check('只改备注成功且判定为未改明细', r.status === 200 && r.data.itemsChanged === false, JSON.stringify(r.data));
+  check('只改备注不写流水', (await api('GET', '/api/ledger?productId=' + epId)).data.length === ledBefore.length);
+  check('只改备注不改成本', (await api('GET', '/api/products')).data.find(p => p.id === epId).avg_cost === avgBefore);
+
+  // 改数量 20 → 30
+  r = await api('PUT', `/api/sales-orders/${esoId}`, {
+    customer_id: cusId, order_date: todayStr, remark: '改数量',
+    items: [{ product_id: epId, unit_id: jian.id, quantity: 30, unit_price: 20 }]
+  });
+  check('改数量成功', r.status === 200 && r.data.itemsChanged === true, JSON.stringify(r.data));
+  check('改数量后单据金额=600', r.data.total_amount === 600, JSON.stringify(r.data));
+  r = await api('GET', `/api/sales-orders/${esoId}`);
+  check('明细被替换而非叠加', r.data.items.length === 1 && r.data.items[0].quantity === 30,
+    JSON.stringify(r.data.items.map(i => i.quantity)));
+  r = await api('GET', '/api/stock?productId=' + epId);
+  check('改单后库存=70', r.data[0]?.quantity === 70, JSON.stringify(r.data));
+  await checkStockEqualsLedger(epId, whId, '改单后');
+  r = await api('GET', '/api/reports/profit?productId=' + epId);
+  check('改单后成本按均价结转=300', Math.abs(r.data.total.cost - 300) < 0.001, JSON.stringify(r.data.total));
+
+  // 改过的单再作废：不能出现重复冲销
+  r = await api('POST', `/api/sales-orders/${esoId}/void`);
+  check('改过的单可以作废', r.status === 200);
+  r = await api('GET', '/api/stock?productId=' + epId);
+  check('改单后再作废，库存回到100', r.data[0]?.quantity === 100, JSON.stringify(r.data));
+  await checkStockEqualsLedger(epId, whId, '改单后作废');
+
+  // 编辑失败要整体回滚
+  r = await api('POST', '/api/sales-orders', {
+    customer_id: cusId, warehouse_id: whId, order_date: todayStr,
+    items: [{ product_id: epId, unit_id: jian.id, quantity: 10, unit_price: 20 }]
+  });
+  const eso2 = r.data.id;
+  const ledN = (await api('GET', '/api/ledger?productId=' + epId)).data.length;
+  const stockN = (await api('GET', '/api/stock?productId=' + epId)).data[0]?.quantity;
+  r = await api('PUT', `/api/sales-orders/${eso2}`, {
+    customer_id: cusId, order_date: todayStr,
+    items: [{ product_id: epId, unit_id: jian.id, quantity: 9999, unit_price: 20 }]
+  });
+  check('改单超库存被拒绝', r.status === 400, JSON.stringify(r.data));
+  check('改单失败后流水未变', (await api('GET', '/api/ledger?productId=' + epId)).data.length === ledN, `原 ${ledN}`);
+  check('改单失败后库存未变', (await api('GET', '/api/stock?productId=' + epId)).data[0]?.quantity === stockN, `原 ${stockN}`);
+
+  // 采购单在销售之后改价：要给出「不重算历史毛利」的警告
+  r = await api('PUT', `/api/purchase-orders/${epoId}`, {
+    supplier_id: supId, order_date: todayStr,
+    items: [{ product_id: epId, unit_id: jian.id, quantity: 100, unit_price: 11 }]
+  });
+  check('采购单卖出后改价返回警告', r.status === 200 && !!r.data.warning, JSON.stringify(r.data));
+  await checkStockEqualsLedger(epId, whId, '采购单改价后');
+  r = await api('GET', '/api/products');
+  check('采购单改价后均价跟到11', Math.abs(r.data.find(p => p.id === epId).avg_cost - 11) < 0.001,
+    `实际 ${r.data.find(p => p.id === epId).avg_cost}`);
+
+  // ---------- 删除恢复 ----------
+  r = await api('POST', '/api/products', { name: '恢复测试品', base_unit_id: jian.id });
+  const restorePid = r.data.id;
+  await api('DELETE', '/api/products/' + restorePid);
+  check('停用商品默认不显示', !(await api('GET', '/api/products')).data.some(p => p.id === restorePid));
+  r = await api('GET', '/api/products?includeInactive=1');
+  check('includeInactive 能看到停用商品', r.data.some(p => p.id === restorePid && p.active === 0));
+  r = await api('POST', `/api/products/${restorePid}/restore`);
+  check('恢复商品', r.status === 200);
+  check('恢复后重新显示', (await api('GET', '/api/products')).data.some(p => p.id === restorePid && p.active === 1));
+
+  // 同名冲突：停用后新建同名，应可识别并引导恢复
+  r = await api('POST', '/api/suppliers', { name: '恢复测试供应商' });
+  const restoreSid = r.data.id;
+  await api('DELETE', '/api/suppliers/' + restoreSid);
+  r = await api('POST', '/api/suppliers', { name: '恢复测试供应商' });
+  check('新建同名停用记录返回409并带inactive_id',
+    r.status === 409 && r.data.inactive_id === restoreSid, JSON.stringify(r.data));
+  r = await api('POST', `/api/suppliers/${restoreSid}/restore`);
+  check('按inactive_id恢复供应商', r.status === 200);
+  check('恢复后供应商重新出现', (await api('GET', '/api/suppliers')).data.some(s => s.id === restoreSid));
+
   // ---------- 参数校验 ----------
   r = await api('POST', '/api/purchase-orders', { items: [] });
   check('缺供应商/仓库校验', r.status === 400);
@@ -431,6 +555,23 @@ try {
   const bkName = r.data[0].name;
   r = await api('GET', '/api/backups/download?file=' + encodeURIComponent(bkName), null, null, true);
   check('备份下载', r.status === 200 && r.buf.length > 1000, `${r.status}, bytes=${r.buf.length}`);
+
+  // ---------- 从备份恢复 ----------
+  r = await api('POST', '/api/products', { name: '恢复要被回退的商品', base_unit_id: jian.id });
+  check('恢复前新增一个商品', r.status === 200);
+  r = await api('POST', '/api/backups/restore', { file: bkName });
+  check('从备份恢复成功', r.status === 200 && r.data.ok === true, JSON.stringify(r.data));
+  r = await api('GET', '/api/products?keyword=' + encodeURIComponent('恢复要被回退的商品'));
+  check('恢复后新增的商品被回退', r.data.length === 0, JSON.stringify(r.data.map(p => p.name)));
+  r = await api('GET', '/api/products');
+  check('恢复后原有商品仍在', r.data.some(p => p.name === '矿泉水'), JSON.stringify(r.data.map(p => p.name)));
+  r = await api('GET', '/api/backups');
+  check('恢复前自动留了安全备份', r.data.some(b => b.name.includes('before-restore')), JSON.stringify(r.data.map(b => b.name)));
+  // 拿错文件不能把库覆盖坏
+  r = await api('POST', '/api/backups/restore', { file: '../../package.json' });
+  check('恢复非备份文件被拒绝', r.status === 400, JSON.stringify(r.data));
+  r = await api('GET', '/api/products');
+  check('拒绝后数据仍在', r.data.some(p => p.name === '矿泉水'));
 
   // ---------- 设置与鉴权 ----------
   r = await api('GET', '/api/settings');

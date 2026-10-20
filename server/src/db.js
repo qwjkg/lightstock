@@ -13,12 +13,24 @@ export const dataDir = process.env.LIGHTSTOCK_DATA_DIR
 fs.mkdirSync(dataDir, { recursive: true });
 export const DB_PATH = path.join(dataDir, 'warehouse.db');
 
-export const db = new Database(DB_PATH);
+// db 用 let 导出：备份恢复时需要关闭连接、替换文件、再重新打开。
+// 其它模块 import 的是活的绑定，重开后自动指向新连接。
+export let db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
 const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
 db.exec(schema);
+
+// 数据库文件被替换后调用：重新打开连接并确保基础结构存在。
+// 调用方负责先 db.close() 并替换好文件。
+export function reopenDb() {
+  db = new Database(DB_PATH);
+  db.pragma('journal_mode = WAL');
+  db.pragma('foreign_keys = ON');
+  db.exec(schema);
+  return db;
+}
 
 // 首次初始化：默认单位、默认仓库、默认设置
 const unitCount = db.prepare('SELECT COUNT(*) AS c FROM units').get().c;

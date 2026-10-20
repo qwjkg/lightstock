@@ -6,7 +6,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const BASE = 'http://localhost:3000';
+// 不要用 3000：那是正式服务的端口，测试会连到正在运行的真实库上。
+const PORT = Number(process.env.SMOKE_PORT || 3100);
+const BASE = `http://localhost:${PORT}`;
 const PASS = { ok: [], fail: [] };
 
 function check(name, cond, extra = '') {
@@ -24,22 +26,47 @@ async function api(method, url, body, token) {
 }
 
 // 安全保护：该测试会删除数据库文件，默认拒绝在已有真实数据的目录运行
-const dbFile = path.join(__dirname, '..', 'data', 'warehouse.db');
+const dataDir = process.env.LIGHTSTOCK_DATA_DIR
+  ? path.resolve(process.env.LIGHTSTOCK_DATA_DIR)
+  : path.join(__dirname, '..', 'data');
+const dbFile = path.join(dataDir, 'warehouse.db');
 if (fs.existsSync(dbFile) && !process.env.SMOKE_ALLOW_DELETE) {
-  console.error('[安全保护] 检测到已有数据库 server/data/warehouse.db。');
+  console.error('[安全保护] 检测到已有数据库 ' + dbFile + '。');
   console.error('本测试会删除该文件，为避免误清空真实数据，请：');
   console.error('  1) 将代码复制到隔离目录运行，或');
   console.error('  2) 确认数据已备份后设置环境变量 SMOKE_ALLOW_DELETE=1 再运行。');
   process.exit(2);
 }
+
+// 端口必须是空的。否则本测试会连到「已经跑着的另一个服务」上，
+// 把测试数据写进那个服务的库——正式服务恰好就在 3000。
+async function portAlreadyServing() {
+  try {
+    await fetch(`${BASE}/api/units`, { signal: AbortSignal.timeout(1500) });
+    return true;
+  } catch { return false; }
+}
+if (await portAlreadyServing()) {
+  console.error(`[安全保护] 端口 ${PORT} 上已经有服务在运行。`);
+  console.error('本测试会写入并删除数据，请先停掉那个服务，或用 SMOKE_PORT 指定其他端口。');
+  process.exit(3);
+}
+
 for (const f of [dbFile, dbFile + '-wal', dbFile + '-shm']) {
   if (fs.existsSync(f)) fs.unlinkSync(f);
 }
 
-const server = spawn('node', ['src/index.js'], { cwd: path.join(__dirname, '..'), stdio: 'ignore', env: { ...process.env, PORT: '3000' } });
+let serverExited = false;
+const server = spawn(process.execPath, ['src/index.js'], {
+  cwd: path.join(__dirname, '..'),
+  stdio: 'ignore',
+  env: { ...process.env, PORT: String(PORT), LIGHTSTOCK_DATA_DIR: dataDir }
+});
+server.on('exit', () => { serverExited = true; });
 
 const waitReady = async () => {
   for (let i = 0; i < 60; i++) {
+    if (serverExited) return false;   // 没起来（多半是端口被占），不要再往下测
     try {
       const r = await fetch(BASE + '/api/units');
       if (r.ok || r.status === 401) return true;
@@ -51,7 +78,9 @@ const waitReady = async () => {
 
 try {
   console.log('=== 轻进销存 冒烟测试 ===');
-  check('服务启动', await waitReady());
+  const ready = await waitReady();
+  check('服务启动', ready);
+  if (!ready) throw new Error(`服务未能启动（端口 ${PORT} 可能被占用）`);
 
   // 基础资料
   const wh = await api('GET', '/api/warehouses');

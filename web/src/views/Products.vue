@@ -6,6 +6,7 @@
         <el-option v-for="c in categories" :key="c" :label="c" :value="c" />
       </el-select>
       <el-button type="primary" @click="load">查询</el-button>
+      <el-checkbox v-model="showInactive" @change="load">显示已停用</el-checkbox>
       <div style="flex:1"></div>
       <el-button @click="downloadTemplate">下载导入模板</el-button>
       <el-upload :show-file-list="false" accept=".xlsx,.xls" :before-upload="importFile">
@@ -14,8 +15,20 @@
       <el-button @click="exportData">导出 Excel</el-button>
       <el-button type="primary" @click="openDialog()">新增商品</el-button>
     </div>
-    <el-table :data="rows" border size="small">
-      <el-table-column prop="name" label="名称" min-width="130" fixed="left" />
+    <el-table :data="rows" border size="small" v-loading="loading">
+      <template #empty>
+        <el-empty :image-size="80"
+          :description="query.keyword || query.category ? '没有匹配的商品' : '还没有商品'">
+          <el-button v-if="!query.keyword && !query.category" type="primary" @click="openDialog()">新增商品</el-button>
+          <span v-else class="empty-tip">换个关键词或分类试试</span>
+        </el-empty>
+      </template>
+      <el-table-column prop="name" label="名称" min-width="150" fixed="left">
+        <template #default="{ row }">
+          {{ row.name }}
+          <el-tag v-if="row.active === 0" size="small" type="info">已停用</el-tag>
+        </template>
+      </el-table-column>
       <el-table-column prop="category" label="分类" width="100" />
       <el-table-column prop="spec" label="规格" width="110" show-overflow-tooltip />
       <el-table-column prop="sku" label="编号" width="100" />
@@ -39,8 +52,13 @@
       </el-table-column>
       <el-table-column label="操作" width="150" fixed="right">
         <template #default="{ row }">
-          <el-button link type="primary" @click="openDialog(row)">编辑</el-button>
-          <el-button link type="danger" @click="remove(row)">停用</el-button>
+          <template v-if="row.active === 0">
+            <el-button link type="success" @click="restore(row)">恢复</el-button>
+          </template>
+          <template v-else>
+            <el-button link type="primary" @click="openDialog(row)">编辑</el-button>
+            <el-button link type="danger" @click="remove(row)">停用</el-button>
+          </template>
         </template>
       </el-table-column>
     </el-table>
@@ -88,9 +106,10 @@
 
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue';
-import { ElMessage, ElMessageBox } from 'element-plus';
+import { ElMessage } from 'element-plus';
 import * as XLSX from 'xlsx';
 import api, { downloadFile } from '../api';
+import { confirmAction, showError } from '../ui';
 import CustomFields from '../components/CustomFields.vue';
 import { isSimple } from '../mode';
 
@@ -98,6 +117,8 @@ const rows = ref([]);
 const categories = ref([]);
 const units = ref([]);
 const showMore = ref(false);
+const showInactive = ref(false);
+const loading = ref(false);
 const query = reactive({ keyword: '', category: '' });
 const dialogVisible = ref(false);
 const form = reactive({ id: null, name: '', sku: '', barcode: '', category: '', spec: '', base_unit_id: null, weight_per_base_kg: 0, purchase_price: 0, sale_price: 0, stock_low: 0, remark: '', custom_data: {} });
@@ -107,12 +128,19 @@ const countUnits = computed(() => units.value.filter(u => u.dimension === 'count
 const defaultUnitId = computed(() => units.value.find(u => u.dimension === 'count' && u.is_base)?.id ?? countUnits.value[0]?.id ?? null);
 
 async function load() {
-  const [p, c, u] = await Promise.all([
-    api.get('/products', { params: query }),
-    api.get('/products/categories'),
-    api.get('/units')
-  ]);
-  rows.value = p; categories.value = c; units.value = u;
+  loading.value = true;
+  try {
+    const [p, c, u] = await Promise.all([
+      api.get('/products', { params: { ...query, includeInactive: showInactive.value ? '1' : '' } }),
+      api.get('/products/categories'),
+      api.get('/units')
+    ]);
+    rows.value = p; categories.value = c; units.value = u;
+  } catch (e) {
+    showError(e, '商品加载失败');
+  } finally {
+    loading.value = false;
+  }
 }
 function openDialog(row) {
   showMore.value = false;
@@ -125,14 +153,30 @@ async function save() {
   // 简易模式没有基准单位下拉，用默认单位兜底，否则这条校验会让表单永远存不上
   if (isSimple.value && !form.base_unit_id) form.base_unit_id = defaultUnitId.value;
   if (!form.base_unit_id) return ElMessage.warning('请选择基准单位');
-  if (form.id) await api.put('/products/' + form.id, form);
-  else await api.post('/products', form);
-  ElMessage.success('已保存'); dialogVisible.value = false; load();
+  try {
+    if (form.id) await api.put('/products/' + form.id, form);
+    else await api.post('/products', form);
+    ElMessage.success('已保存'); dialogVisible.value = false; load();
+  } catch (e) {
+    showError(e, '保存失败');
+  }
 }
 async function remove(row) {
-  await ElMessageBox.confirm(`确定停用商品「${row.name}」吗？`, '提示', { type: 'warning' });
-  await api.delete('/products/' + row.id);
-  ElMessage.success('已停用'); load();
+  if (!(await confirmAction(`确定停用商品「${row.name}」吗？停用后可以在「显示已停用」里恢复。`, '停用商品'))) return;
+  try {
+    await api.delete('/products/' + row.id);
+    ElMessage.success('已停用'); load();
+  } catch (e) {
+    showError(e, '停用失败');
+  }
+}
+async function restore(row) {
+  try {
+    await api.post(`/products/${row.id}/restore`);
+    ElMessage.success('已恢复'); load();
+  } catch (e) {
+    showError(e, '恢复失败');
+  }
 }
 function isLow(row) { return row.stock_low > 0 && row.stock_qty < row.stock_low; }
 function convertText(row) {
@@ -170,4 +214,5 @@ async function importFile(file) {
 onMounted(load);
 </script>
 
-<style scoped>.toolbar { display: flex; gap: 8px; margin-bottom: 12px; }</style>
+<style scoped>.toolbar { display: flex; gap: 8px; margin-bottom: 12px; }
+.empty-tip { color: #909399; font-size: 13px; }</style>

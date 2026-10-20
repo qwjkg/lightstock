@@ -2,10 +2,19 @@
   <el-card shadow="never">
     <div class="toolbar">
       <el-button type="primary" @click="openDialog()">新增单位</el-button>
+      <el-checkbox v-model="showInactive" @change="load">显示已停用</el-checkbox>
       <span class="tip">换算说明：1 单位 = 换算倍数 × 基准单位（如 1 箱 = 24 件）；重量单位为可选的另一套体系</span>
     </div>
-    <el-table :data="rows" border>
-      <el-table-column prop="name" label="单位名称" width="140" />
+    <el-table :data="rows" border v-loading="loading">
+      <template #empty>
+        <el-empty :image-size="80" description="还没有单位" />
+      </template>
+      <el-table-column prop="name" label="单位名称" width="180">
+        <template #default="{ row }">
+          {{ row.name }}
+          <el-tag v-if="row.active === 0" size="small" type="info">已停用</el-tag>
+        </template>
+      </el-table-column>
       <el-table-column label="类型" width="100">
         <template #default="{ row }">{{ row.dimension === 'weight' ? '重量' : '数量' }}</template>
       </el-table-column>
@@ -18,8 +27,13 @@
       <el-table-column prop="sort_order" label="排序" width="80" />
       <el-table-column label="操作" width="150">
         <template #default="{ row }">
-          <el-button link type="primary" @click="openDialog(row)">编辑</el-button>
-          <el-button link type="danger" @click="remove(row)">停用</el-button>
+          <template v-if="row.active === 0">
+            <el-button link type="success" @click="restore(row)">恢复</el-button>
+          </template>
+          <template v-else>
+            <el-button link type="primary" @click="openDialog(row)">编辑</el-button>
+            <el-button link type="danger" @click="remove(row)">停用</el-button>
+          </template>
         </template>
       </el-table-column>
     </el-table>
@@ -47,28 +61,61 @@
 
 <script setup>
 import { onMounted, reactive, ref } from 'vue';
-import { ElMessage, ElMessageBox } from 'element-plus';
+import { ElMessage } from 'element-plus';
 import api from '../api';
+import { confirmAction, inactiveConflict, showError } from '../ui';
 
 const rows = ref([]);
+const showInactive = ref(false);
+const loading = ref(false);
 const dialogVisible = ref(false);
 const form = reactive({ id: null, name: '', dimension: 'count', ratio: 1, weight_per: null, sort_order: 0 });
 
-async function load() { rows.value = await api.get('/units'); }
+async function load() {
+  loading.value = true;
+  try {
+    rows.value = await api.get('/units', { params: showInactive.value ? { includeInactive: '1' } : {} });
+  } catch (e) {
+    showError(e, '单位加载失败');
+  } finally {
+    loading.value = false;
+  }
+}
 function openDialog(row) {
   Object.assign(form, row ? { ...row } : { id: null, name: '', dimension: 'count', ratio: 1, weight_per: null, sort_order: 0 });
   dialogVisible.value = true;
 }
 async function save() {
   if (!form.name) return ElMessage.warning('请输入单位名称');
-  if (form.id) await api.put('/units/' + form.id, form);
-  else await api.post('/units', form);
-  ElMessage.success('已保存'); dialogVisible.value = false; load();
+  try {
+    if (form.id) await api.put('/units/' + form.id, form);
+    else await api.post('/units', form);
+    ElMessage.success('已保存'); dialogVisible.value = false; load();
+  } catch (e) {
+    const c = inactiveConflict(e);
+    if (c) {
+      const ok = await confirmAction(`${c.message}。是否现在恢复它？`, '存在同名停用记录');
+      if (ok) {
+        try { await api.post(`/units/${c.id}/restore`); ElMessage.success('已恢复'); dialogVisible.value = false; load(); }
+        catch (err) { showError(err, '恢复失败'); }
+      }
+      return;
+    }
+    showError(e, '保存失败');
+  }
 }
 async function remove(row) {
-  await ElMessageBox.confirm(`确定停用单位「${row.name}」吗？`, '提示', { type: 'warning' });
-  await api.delete('/units/' + row.id);
-  ElMessage.success('已停用'); load();
+  if (!(await confirmAction(`确定停用单位「${row.name}」吗？停用后可以在「显示已停用」里恢复。`, '停用单位'))) return;
+  try {
+    await api.delete('/units/' + row.id);
+    ElMessage.success('已停用'); load();
+  } catch (e) { showError(e, '停用失败'); }
+}
+async function restore(row) {
+  try {
+    await api.post(`/units/${row.id}/restore`);
+    ElMessage.success('已恢复'); load();
+  } catch (e) { showError(e, '恢复失败'); }
 }
 onMounted(load);
 </script>

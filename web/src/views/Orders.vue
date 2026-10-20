@@ -11,7 +11,14 @@
         <div style="flex:1"></div>
         <el-button type="primary" @click="openCreate">新增{{ kindText }}单</el-button>
       </div>
-      <el-table :data="rows" border size="small">
+      <el-table :data="rows" border size="small" v-loading="loading">
+        <template #empty>
+          <el-empty :image-size="80"
+            :description="hasFilter ? '没有匹配的单据' : `还没有${kindText}单`">
+            <el-button v-if="!hasFilter" type="primary" @click="openCreate">新增{{ kindText }}单</el-button>
+            <span v-else class="empty-tip">换个日期范围或关键词试试</span>
+          </el-empty>
+        </template>
         <el-table-column prop="order_no" label="单号" width="160" fixed="left" />
         <el-table-column prop="order_date" label="日期" width="110" />
         <el-table-column :prop="partnerField" label="往来单位" min-width="130">
@@ -26,9 +33,10 @@
           </template>
         </el-table-column>
         <el-table-column prop="remark" label="备注" min-width="120" show-overflow-tooltip />
-        <el-table-column label="操作" width="215" fixed="right">
+        <el-table-column label="操作" width="265" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="openDetail(row)">查看</el-button>
+            <el-button v-if="row.status === 'done'" link type="primary" @click="openEdit(row)">编辑</el-button>
             <el-button link type="primary" @click="copyFrom(row)">再来一单</el-button>
             <el-button v-if="row.status === 'done'" link type="danger" @click="voidOrder(row)">作废</el-button>
           </template>
@@ -37,7 +45,7 @@
     </el-card>
 
     <!-- 新建单据 -->
-    <el-dialog v-model="createVisible" :title="'新增' + kindText + '单'" width="860px" top="4vh">
+    <el-dialog v-model="createVisible" :title="dialogTitle" width="860px" top="4vh">
       <el-form label-width="80px">
         <el-row :gutter="10">
           <el-col :span="8">
@@ -52,7 +60,7 @@
           </el-col>
           <el-col :span="8">
             <el-form-item label="仓库" required>
-              <el-select v-model="draft.warehouse_id" placeholder="选择" style="width:100%">
+              <el-select v-model="draft.warehouse_id" placeholder="选择" style="width:100%" :disabled="!!editingId">
                 <el-option v-for="w in warehouses" :key="w.id" :label="w.name" :value="w.id" />
               </el-select>
             </el-form-item>
@@ -162,6 +170,7 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import api from '../api';
+import { confirmAction } from '../ui';
 import CustomFields from '../components/CustomFields.vue';
 import { isSimple } from '../mode';
 
@@ -179,6 +188,9 @@ const units = ref([]);
 const range = ref([]);
 const query = reactive({ partnerId: '', keyword: '' });
 const createVisible = ref(false);
+const editingId = ref(null);      // 非空表示正在修改这张单
+const editingNo = ref('');
+const loading = ref(false);
 const detailVisible = ref(false);
 const detail = ref({});
 const saving = ref(false);
@@ -193,6 +205,11 @@ const countUnits = computed(() => units.value.filter(u => u.dimension === 'count
 // 简易模式不显示单位选择，明细一律按商品基准单位录入
 const defaultUnitId = computed(() => units.value.find(u => u.dimension === 'count' && u.is_base)?.id ?? countUnits.value[0]?.id ?? null);
 
+const dialogTitle = computed(() =>
+  editingId.value ? `修改${kindText.value}单 · ${editingNo.value}` : `新增${kindText.value}单`);
+const hasFilter = computed(() =>
+  !!(query.keyword || query.partnerId || (range.value && range.value.length)));
+
 function emptyDraft() {
   return {
     partner_id: null, warehouse_id: null, order_date: new Date().toISOString().slice(0, 10),
@@ -200,16 +217,26 @@ function emptyDraft() {
   };
 }
 
-async function loadPartners() {
-  partners.value = await api.get(props.kind === 'purchase' ? '/suppliers' : '/customers');
+async function loadPartners(includeInactive = false) {
+  partners.value = await api.get(
+    props.kind === 'purchase' ? '/suppliers' : '/customers',
+    { params: includeInactive ? { includeInactive: '1' } : {} }
+  );
 }
 async function load() {
-  const [o, w] = await Promise.all([
-    api.get(baseUrl.value, { params: { ...query, from: range.value?.[0] || '', to: range.value?.[1] || '' } }),
-    api.get('/warehouses')
-  ]);
-  rows.value = o; warehouses.value = w;
-  await loadPartners();
+  loading.value = true;
+  try {
+    const [o, w] = await Promise.all([
+      api.get(baseUrl.value, { params: { ...query, from: range.value?.[0] || '', to: range.value?.[1] || '' } }),
+      api.get('/warehouses')
+    ]);
+    rows.value = o; warehouses.value = w;
+    await loadPartners();
+  } catch (e) {
+    ElMessage.error(e.response?.data?.error || '加载失败');
+  } finally {
+    loading.value = false;
+  }
 }
 function openQuickPartner() {
   Object.assign(quick, { name: '', contact: '', phone: '', address: '', remark: '' });
@@ -227,8 +254,12 @@ async function saveQuickPartner() {
   } catch (e) { ElMessage.error(e.response?.data?.error || '保存失败'); }
   finally { quickSaving.value = false; }
 }
-async function loadRefs() {
-  const [p, u] = await Promise.all([api.get('/products'), api.get('/units')]);
+async function loadRefs(includeInactive = false) {
+  const params = includeInactive ? { includeInactive: '1' } : {};
+  const [p, u] = await Promise.all([
+    api.get('/products', { params }),
+    api.get('/units', { params })
+  ]);
   products.value = p; units.value = u;
 }
 async function loadSuggest() {
@@ -242,6 +273,8 @@ async function loadSuggest() {
 // 换了往来单位就重新取他的常卖货与历史价
 watch(() => draft.partner_id, () => { if (createVisible.value) loadSuggest(); });
 function openCreate() {
+  editingId.value = null;
+  editingNo.value = '';
   Object.assign(draft, emptyDraft());
   // 只有一个仓库时直接选好，省掉每单都要点一次的下拉
   if (warehouses.value.length === 1) draft.warehouse_id = warehouses.value[0].id;
@@ -249,9 +282,43 @@ function openCreate() {
   loadRefs();
   loadSuggest();
 }
+// 编辑：回填原单据。停用的商品/单位/往来单位也要带进来，
+// 否则下拉框会显示为空，用户会以为数据丢了。
+async function openEdit(row) {
+  try {
+    const d = await api.get(baseUrl.value + '/' + row.id);
+    editingId.value = row.id;
+    editingNo.value = d.order_no;
+    Object.assign(draft, {
+      partner_id: props.kind === 'purchase' ? d.supplier_id : d.customer_id,
+      warehouse_id: d.warehouse_id,
+      order_date: d.order_date,
+      remark: d.remark || '',
+      custom_data: JSON.parse(d.custom_data || '{}'),
+      items: (d.items || []).map(i => ({
+        product_id: i.product_id,
+        unit_id: i.unit_id,
+        quantity: i.quantity,
+        unit_price: i.unit_price,
+        remark: i.remark || ''
+      }))
+    });
+    if (!draft.items.length) {
+      draft.items = [{ product_id: null, unit_id: null, quantity: 1, unit_price: 0 }];
+    }
+    createVisible.value = true;
+    loadRefs(true);
+    loadPartners(true);
+    loadSuggest();
+  } catch (e) {
+    ElMessage.error(e.response?.data?.error || '单据加载失败');
+  }
+}
 // 再来一单：把历史单据的明细、数量、单价整套搬进草稿
 async function copyFrom(row) {
   const d = await api.get(baseUrl.value + '/' + row.id);
+  editingId.value = null;
+  editingNo.value = '';
   Object.assign(draft, emptyDraft());
   draft.partner_id = props.kind === 'purchase' ? d.supplier_id : d.customer_id;
   draft.warehouse_id = d.warehouse_id;
@@ -260,7 +327,7 @@ async function copyFrom(row) {
   }));
   if (!draft.items.length) draft.items = [{ product_id: null, unit_id: null, quantity: 1, unit_price: 0 }];
   createVisible.value = true;
-  loadRefs();
+  loadRefs(true);
   loadSuggest();
 }
 function addSuggested(s) {
@@ -321,8 +388,19 @@ async function submit() {
       warehouse_id: draft.warehouse_id, order_date: draft.order_date, remark: draft.remark,
       custom_data: draft.custom_data, items
     };
-    const r = await api.post(baseUrl.value, body);
-    ElMessage.success(`保存成功，单号 ${r.order_no}`);
+    const r = editingId.value
+      ? await api.put(baseUrl.value + '/' + editingId.value, body)
+      : await api.post(baseUrl.value, body);
+    if (r.warning) {
+      await ElMessageBox.alert(r.warning, '已保存，请注意', { type: 'warning', confirmButtonText: '知道了' });
+    }
+    if (r.negative && r.negative.length) {
+      await ElMessageBox.alert(
+        `保存后下列商品库存为负数：${r.negative.map(n => `${n.name} ${n.quantity}`).join('、')}。请到「库存」页核对并用库存修正补齐。`,
+        '库存出现负数', { type: 'warning', confirmButtonText: '知道了' }
+      );
+    }
+    ElMessage.success(editingId.value ? '修改已保存' : `保存成功，单号 ${r.order_no}`);
     createVisible.value = false; load();
   } catch (e) { ElMessage.error(e.response?.data?.error || '保存失败'); }
   finally { saving.value = false; }
@@ -332,7 +410,7 @@ async function openDetail(row) {
   detailVisible.value = true;
 }
 async function voidOrder(row) {
-  await ElMessageBox.confirm(`确定作废单号 ${row.order_no} 吗？库存将自动冲回。`, '作废确认', { type: 'warning' });
+  if (!(await confirmAction(`确定作废单号 ${row.order_no} 吗？库存将自动冲回。`, '作废确认'))) return;
   const r = await api.post(baseUrl.value + '/' + row.id + '/void');
   // 作废一张货已售出的采购单，会把库存压成负数。负数本身是如实记账，
   // 但必须让用户看见并去补齐，否则等于换种方式把账面缺口藏起来。
@@ -353,6 +431,7 @@ onMounted(load);
 <style scoped>
 .toolbar { display: flex; gap: 8px; margin-bottom: 12px; }
 .total-bar { margin-top: 10px; background: #f5f7fa; padding: 8px 12px; border-radius: 4px; font-size: 14px; }
+.empty-tip { color: #909399; font-size: 13px; }
 .quick-picks { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: -4px 0 10px; }
 .qp-label { font-size: 12px; color: #909399; }
 .qp-tag { cursor: pointer; }

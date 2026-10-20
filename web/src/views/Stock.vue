@@ -10,15 +10,22 @@
       <div style="flex:1"></div>
       <el-button @click="downloadFile('/export/stock', '库存清单.xlsx')">导出 Excel</el-button>
     </div>
-    <el-table :data="rows" border size="small" max-height="640">
+    <el-table :data="rows" border size="small" max-height="640" v-loading="loading">
+      <template #empty>
+        <el-empty :image-size="80"
+          :description="query.keyword || query.lowOnly ? '没有匹配的库存记录' : '还没有库存'">
+          <span v-if="!query.keyword && !query.lowOnly" class="empty-tip">进货之后这里会显示库存</span>
+          <span v-else class="empty-tip">换个筛选条件试试</span>
+        </el-empty>
+      </template>
       <el-table-column prop="name" label="商品" min-width="140" fixed="left" />
       <el-table-column prop="category" label="分类" width="100" />
       <el-table-column prop="spec" label="规格" width="100" show-overflow-tooltip />
       <el-table-column prop="warehouse_name" label="仓库" width="110" />
-      <el-table-column :label="isSimple ? '库存' : '库存(基准)'" width="110">
+      <el-table-column :label="isSimple ? '库存' : '库存(基准)'" width="120">
         <template #default="{ row }">
-          <span :style="{ color: row.stock_low > 0 && row.quantity < row.stock_low ? '#f56c6c' : 'inherit', fontWeight: row.stock_low > 0 && row.quantity < row.stock_low ? 700 : 400 }">
-            {{ row.quantity }} {{ row.unit_name }}{{ row.stock_low > 0 && row.quantity < row.stock_low ? ' ⚠' : '' }}
+          <span :style="{ color: isBad(row) ? '#f56c6c' : 'inherit', fontWeight: isBad(row) ? 700 : 400 }">
+            {{ row.quantity }} {{ row.unit_name }}{{ row.quantity < 0 ? ' ⚠负数' : (isLow(row) ? ' ⚠' : '') }}
           </span>
         </template>
       </el-table-column>
@@ -61,11 +68,13 @@
 import { computed, onMounted, reactive, ref } from 'vue';
 import { ElMessage } from 'element-plus';
 import api, { downloadFile } from '../api';
+import { showError } from '../ui';
 import { isSimple } from '../mode';
 
 const rows = ref([]);
 const warehouses = ref([]);
 const units = ref([]);
+const loading = ref(false);
 const query = reactive({ warehouseId: '', keyword: '', lowOnly: false });
 const adjustVisible = ref(false);
 const adjustRow = ref({});
@@ -75,9 +84,24 @@ const countUnits = computed(() => units.value.filter(u => u.dimension === 'count
 const defaultUnitId = computed(() => units.value.find(u => u.dimension === 'count' && u.is_base)?.id ?? countUnits.value[0]?.id ?? null);
 
 async function load() {
-  const [s, w, u] = await Promise.all([api.get('/stock', { params: query }), api.get('/warehouses'), api.get('/units')]);
-  rows.value = s; warehouses.value = w; units.value = u;
+  loading.value = true;
+  try {
+    const [s, w, u] = await Promise.all([
+      // lowOnly 后端只认 '1'；之前传的是布尔值，这个筛选其实一直没生效
+      api.get('/stock', { params: { ...query, lowOnly: query.lowOnly ? '1' : '' } }),
+      api.get('/warehouses'),
+      api.get('/units')
+    ]);
+    rows.value = s; warehouses.value = w; units.value = u;
+  } catch (e) {
+    showError(e, '库存加载失败');
+  } finally {
+    loading.value = false;
+  }
 }
+function isLow(row) { return row.stock_low > 0 && Number(row.quantity) < row.stock_low; }
+// 负数库存是账实不符的信号，和低库存一样必须显眼
+function isBad(row) { return Number(row.quantity) < 0 || isLow(row); }
 function convertText(row) {
   const parts = countUnits.value.filter(u => u.ratio > 1).map(u => {
     const v = row.quantity / u.ratio;
@@ -92,10 +116,15 @@ function openAdjust(row) {
 }
 async function submitAdjust() {
   if (!adjustForm.delta_qty) return ElMessage.warning('调整数量不能为 0');
-  await api.post('/stock/adjust', { product_id: adjustRow.value.product_id, warehouse_id: adjustRow.value.warehouse_id, unit_id: adjustForm.unit_id, delta_qty: adjustForm.delta_qty, remark: adjustForm.remark });
-  ElMessage.success('已调整'); adjustVisible.value = false; load();
+  try {
+    await api.post('/stock/adjust', { product_id: adjustRow.value.product_id, warehouse_id: adjustRow.value.warehouse_id, unit_id: adjustForm.unit_id, delta_qty: adjustForm.delta_qty, remark: adjustForm.remark });
+    ElMessage.success('已调整'); adjustVisible.value = false; load();
+  } catch (e) {
+    showError(e, '调整失败');
+  }
 }
 onMounted(load);
 </script>
 
-<style scoped>.toolbar { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; }</style>
+<style scoped>.toolbar { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; }
+.empty-tip { color: #909399; font-size: 13px; }</style>

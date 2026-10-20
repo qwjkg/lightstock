@@ -89,17 +89,28 @@
     <el-tab-pane label="数据备份" name="backup">
       <div class="toolbar">
         <el-button type="primary" @click="backupNow">立即备份</el-button>
+        <el-upload :show-file-list="false" accept=".db" :before-upload="restoreFromFile">
+          <el-button>从文件恢复</el-button>
+        </el-upload>
         <span class="tip">系统启动时及每隔 N 小时自动备份到 server/data/backups/，保留最近 30 份</span>
       </div>
-      <el-table :data="backups" border size="small">
+      <el-alert v-if="backups.length" type="info" :closable="false" style="margin-bottom:10px"
+        title="恢复会用备份覆盖当前全部数据。恢复前系统会自动把当前库存一份，恢复后需要重新登录。" />
+      <el-table :data="backups" border size="small" v-loading="backupLoading">
+        <template #empty>
+          <el-empty :image-size="80" description="还没有备份记录">
+            <el-button type="primary" @click="backupNow">立即备份</el-button>
+          </el-empty>
+        </template>
         <el-table-column prop="time" label="备份时间" width="200" />
         <el-table-column prop="name" label="文件名" />
         <el-table-column label="大小" width="110">
           <template #default="{ row }">{{ (row.size / 1024).toFixed(1) }} KB</template>
         </el-table-column>
-        <el-table-column label="操作" width="110">
+        <el-table-column label="操作" width="150">
           <template #default="{ row }">
             <el-button link type="primary" @click="downloadFile('/backups/download?file=' + encodeURIComponent(row.name), row.name)">下载</el-button>
+            <el-button link type="danger" @click="restoreFromServer(row)">恢复</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -135,6 +146,7 @@ import { onMounted, reactive, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import * as XLSX from 'xlsx';
 import api, { downloadFile } from '../api';
+import { confirmAction, showError } from '../ui';
 import { isSimple, mode, hasDemo, switchMode, setBusinessName } from '../mode';
 import Warehouses from './Warehouses.vue';
 
@@ -158,6 +170,7 @@ const fieldDialog = ref(false);
 const optionsText = ref('');
 const fieldForm = reactive({ id: null, entity: 'product', name: '', label: '', field_type: 'text', options: [], required: false });
 const backups = ref([]);
+const backupLoading = ref(false);
 
 async function loadBase() {
   const s = await api.get('/settings');
@@ -212,6 +225,41 @@ async function backupNow() {
   ElMessage.success('备份完成');
 }
 async function loadBackups() { backups.value = await api.get('/backups'); }
+
+// 恢复会用备份覆盖当前全部数据。服务端在覆盖前会先把当前库另存一份。
+async function doRestore(payload, label) {
+  const ok = await confirmAction(
+    `确定用「${label}」恢复吗？\n\n当前全部数据会被覆盖。恢复前系统会自动把当前数据另存一份，恢复后需要重新登录。`,
+    '恢复数据'
+  );
+  if (!ok) return;
+  backupLoading.value = true;
+  try {
+    const r = await api.post('/backups/restore', payload);
+    ElMessage.success(`已恢复，当前数据已另存为 ${r.safety}`);
+    setTimeout(() => location.reload(), 900);
+  } catch (e) {
+    showError(e, '恢复失败');
+  } finally {
+    backupLoading.value = false;
+  }
+}
+function restoreFromServer(row) {
+  return doRestore({ file: row.name }, row.name);
+}
+// 从本机选择备份文件恢复（换电脑、硬盘坏了的场景）
+async function restoreFromFile(file) {
+  try {
+    const buf = await file.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    await doRestore({ data_base64: btoa(binary), filename: file.name }, file.name);
+  } catch (e) {
+    ElMessage.error('读取备份文件失败');
+  }
+  return false;   // 阻止 el-upload 自己发起上传
+}
 
 async function importProducts(file) {
   try {

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { db } from '../db.js';
-import { createPurchaseOrder, createSalesOrder, voidOrder } from '../services/stock.js';
+import { createPurchaseOrder, createSalesOrder, updateOrder, voidOrder } from '../services/stock.js';
 
 const router = Router();
 
@@ -100,6 +100,10 @@ router.post('/purchase-orders', (req, res) => {
   try { res.json(createPurchaseOrder(req.body)); }
   catch (e) { res.status(400).json({ error: e.message }); }
 });
+router.put('/purchase-orders/:id', (req, res) => {
+  try { res.json(updateOrder('purchase', Number(req.params.id), req.body)); }
+  catch (e) { res.status(400).json({ error: e.message }); }
+});
 router.post('/purchase-orders/:id/void', (req, res) => {
   try { res.json(voidOrder('purchase', Number(req.params.id))); }
   catch (e) { res.status(400).json({ error: e.message }); }
@@ -109,6 +113,10 @@ router.get('/sales-orders', orderList('sales'));
 router.get('/sales-orders/:id', orderDetail('sales'));
 router.post('/sales-orders', (req, res) => {
   try { res.json(createSalesOrder(req.body)); }
+  catch (e) { res.status(400).json({ error: e.message }); }
+});
+router.put('/sales-orders/:id', (req, res) => {
+  try { res.json(updateOrder('sales', Number(req.params.id), req.body)); }
   catch (e) { res.status(400).json({ error: e.message }); }
 });
 router.post('/sales-orders/:id/void', (req, res) => {

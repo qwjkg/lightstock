@@ -1,8 +1,9 @@
 import { Router } from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
+import Database from 'better-sqlite3';
 import XLSX from 'xlsx';
-import { db, dataDir, getSetting, setSetting, round, DB_PATH } from '../db.js';
+import { db, dataDir, getSetting, setSetting, round, DB_PATH, reopenDb } from '../db.js';
 import { resetTokens } from '../auth.js';
 
 const router = Router();
@@ -69,6 +70,71 @@ router.get('/backups/download', (req, res) => {
   const file = path.join(backupDir(), name);
   if (!name.endsWith('.db') || !fs.existsSync(file)) return res.status(404).json({ error: '备份文件不存在' });
   res.download(file);
+});
+
+// 从备份恢复。支持两种来源：
+//   { file: 'warehouse-xxxx.db' }        服务器上已有的备份
+//   { data_base64, filename }            用户从本机上传的备份（换电脑/硬盘坏了的情况）
+// 恢复前会自动把当前库存一份，失败时尽量退回去。
+router.post('/backups/restore', (req, res) => {
+  const b = req.body || {};
+  let source = '';
+  let tempPath = '';
+  let safetyPath = '';
+  try {
+    if (b.file) {
+      const name = path.basename(String(b.file));
+      source = path.join(backupDir(), name);
+      if (!name.endsWith('.db') || !fs.existsSync(source)) {
+        return res.status(400).json({ error: '备份文件不存在' });
+      }
+    } else if (b.data_base64) {
+      tempPath = path.join(backupDir(), `upload-${Date.now()}.db`);
+      fs.writeFileSync(tempPath, Buffer.from(String(b.data_base64), 'base64'));
+      source = tempPath;
+    } else {
+      return res.status(400).json({ error: '请选择要恢复的备份文件' });
+    }
+
+    // 先确认这确实是一个 LightStock 备份，避免拿错文件把库覆盖坏
+    let valid = false;
+    try {
+      const probe = new Database(source, { readonly: true });
+      valid = !!probe.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='products'").get();
+      probe.close();
+    } catch { valid = false; }
+    if (!valid) return res.status(400).json({ error: '这个文件不是有效的 LightStock 备份' });
+
+    // 当前库先落盘，再另存一份
+    db.pragma('wal_checkpoint(TRUNCATE)');
+    const ts = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19);
+    safetyPath = path.join(backupDir(), `warehouse-before-restore-${ts}.db`);
+    fs.copyFileSync(DB_PATH, safetyPath);
+
+    db.close();
+    fs.copyFileSync(source, DB_PATH);
+    for (const f of [DB_PATH + '-wal', DB_PATH + '-shm']) {
+      try { fs.unlinkSync(f); } catch { /* 不存在就跳过 */ }
+    }
+    reopenDb();
+    resetTokens();   // 恢复后旧 token 作废，需要重新登录
+    res.json({ ok: true, restored: path.basename(source), safety: path.basename(safetyPath), list: listBackups() });
+  } catch (e) {
+    // 尽力退回恢复前的状态
+    try { if (db.open) db.close(); } catch { /* ignore */ }
+    if (safetyPath && fs.existsSync(safetyPath)) {
+      try {
+        fs.copyFileSync(safetyPath, DB_PATH);
+        for (const f of [DB_PATH + '-wal', DB_PATH + '-shm']) {
+          try { fs.unlinkSync(f); } catch { /* ignore */ }
+        }
+      } catch { /* ignore */ }
+    }
+    try { reopenDb(); } catch { /* ignore */ }
+    res.status(500).json({ error: '恢复失败：' + e.message });
+  } finally {
+    if (tempPath) { try { fs.unlinkSync(tempPath); } catch { /* ignore */ } }
+  }
 });
 
 // ---------- 商品 Excel 导入（rows 由前端 xlsx 解析后提交 JSON） ----------

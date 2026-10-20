@@ -1,5 +1,7 @@
 <template>
   <router-view v-if="route.path === '/login'" />
+  <!-- 移动端路由自带外壳（底部页签），不再套桌面侧栏 -->
+  <router-view v-else-if="isMobileLayout" />
   <el-container v-else class="app-shell">
     <el-aside width="200px" class="aside">
       <div class="logo" :title="businessName">📦 {{ businessName }}</div>
@@ -19,8 +21,9 @@
       </el-header>
       <el-main class="main"><router-view :key="route.path" /></el-main>
     </el-container>
-    <OnboardingWizard v-if="settingsLoaded && !onboarded" />
   </el-container>
+  <!-- 引导在两个布局下都要能出现，所以放在外壳之外 -->
+  <OnboardingWizard v-if="settingsLoaded && !onboarded && route.path !== '/login'" />
 </template>
 
 <script setup>
@@ -36,6 +39,8 @@ const route = useRoute();
 const menus = computed(() => router.options.routes.filter(
   r => r.meta && r.meta.title && (!isSimple.value || r.meta.simple !== false)
 ));
+
+const isMobileLayout = computed(() => route.matched.some(r => r.meta && r.meta.layout === 'mobile'));
 
 onMounted(async () => {
   try {
