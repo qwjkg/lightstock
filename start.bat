@@ -15,6 +15,12 @@ if not exist "server\node_modules" (
   call npm install --no-audit --no-fund
   popd
 )
+if exist "server\node_modules" if not exist "server\node_modules\openai" (
+  echo [1/3] Installing new backend dependencies - needs internet...
+  pushd server
+  call npm install --no-audit --no-fund
+  popd
+)
 
 if not exist "web\node_modules" (
   echo [2/3] Installing frontend dependencies - needs internet...

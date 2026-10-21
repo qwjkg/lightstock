@@ -2,7 +2,10 @@
   <div class="m-shell">
     <header class="m-header">
       <span class="m-title">{{ businessName }}</span>
-      <button class="m-link" @click="toDesktop">电脑版</button>
+      <div class="m-actions">
+        <button class="m-link m-ai-link" @click="openAi">✨ AI</button>
+        <button class="m-link" @click="toDesktop">电脑版</button>
+      </div>
     </header>
 
     <main class="m-main">
@@ -23,6 +26,7 @@
 import { useRoute, useRouter } from 'vue-router';
 import { businessName } from '../mode';
 import { setLayoutPref } from '../device';
+import { openAi } from '../ai/useAi';
 
 const route = useRoute();
 const router = useRouter();
@@ -71,6 +75,8 @@ function toDesktop() {
   padding: 4px 12px;
   font-size: 12px;
 }
+.m-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.m-ai-link { border-color: rgba(230, 162, 60, .8); color: #ffd58a; }
 .m-main {
   flex: 1 1 auto;
   overflow-y: auto;

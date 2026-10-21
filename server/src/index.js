@@ -11,6 +11,7 @@ import stockRoutes from './routes/stock.js';
 import reportRoutes from './routes/reports.js';
 import systemRoutes, { createBackupFile } from './routes/system.js';
 import demoRoutes from './routes/demo.js';
+import aiRoutes from './routes/ai.js';
 import { migrateCostV2 } from './migrate.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -42,6 +43,7 @@ app.use('/api', stockRoutes);
 app.use('/api', reportRoutes);
 app.use('/api', systemRoutes);
 app.use('/api', demoRoutes);
+app.use('/api', aiRoutes);
 
 // 托管前端构建产物
 const dist = path.join(__dirname, '..', '..', 'web', 'dist');

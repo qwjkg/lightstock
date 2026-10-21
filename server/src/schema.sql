@@ -182,3 +182,32 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT DEFAULT ''
 );
+
+-- AI 助手审计：记录对话、工具调用、写操作提案与确认。
+-- user_id / actor_type / auth_method / role 为将来的账号体系预留，v1 填本地默认值。
+CREATE TABLE IF NOT EXISTS ai_audit_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL DEFAULT '',
+  user_id INTEGER,
+  actor_type TEXT NOT NULL DEFAULT 'local',
+  auth_method TEXT NOT NULL DEFAULT '',
+  role TEXT NOT NULL DEFAULT 'owner',
+  created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  kind TEXT NOT NULL,
+  tool_name TEXT DEFAULT '',
+  args_json TEXT DEFAULT '',
+  result_summary TEXT DEFAULT '',
+  permission_level TEXT NOT NULL DEFAULT 'read',
+  action_id TEXT DEFAULT '',
+  action_status TEXT DEFAULT '',
+  ref_type TEXT DEFAULT '',
+  ref_id INTEGER,
+  ref_no TEXT DEFAULT '',
+  model TEXT DEFAULT '',
+  prompt_tokens INTEGER NOT NULL DEFAULT 0,
+  completion_tokens INTEGER NOT NULL DEFAULT 0,
+  duration_ms INTEGER NOT NULL DEFAULT 0,
+  error TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_ai_audit_created ON ai_audit_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_ai_audit_session ON ai_audit_log(session_id);

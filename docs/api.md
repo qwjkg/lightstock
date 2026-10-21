@@ -40,6 +40,24 @@ items 元素：`{ product_id, unit_id, quantity, unit_price, remark }`，quantit
 | GET | /reports/profit | 毛利报表（销售额/成本/毛利/毛利率，可按商品） |
 | GET | /reports/dashboard | 仪表盘统计数据 |
 
+## AI 助手（只读 + 受控写入）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | /ai/status | AI 是否启用、Key 是否配置（不返回 Key）、模型、隐私级别、当前会话权限；可带 `session_id` |
+| POST | /ai/session | 创建 AI 会话，返回 session_id、actor、权限 |
+| POST | /ai/chat | 对话：`{ session_id, messages }`，服务端执行工具查询并返回文字、数据卡片、工具轨迹；有写提案时返回 `actions` |
+| POST | /ai/permission | 授权/锁定：`{ session_id, level: read/write/danger, minutes, password, confirm_text }`；`write` 15 分钟；`danger` 5 分钟，必须有访问密码且 `confirm_text` 为「确认高风险」 |
+| POST | /ai/actions/:id/confirm | 确认执行待办操作：`{ session_id, confirm_token }`；支持创建进货/出货/盘点，以及高风险作废/改单；确认前不写库，执行前自动备份并重新校验 |
+| POST | /ai/actions/:id/cancel | 取消待办操作：`{ session_id, confirm_token }` |
+| GET | /ai/audit | AI 操作记录（limit/kind/session_id 筛选） |
+| GET | /ai/health | 配置状态检查 |
+| POST | /ai/test | 用最小请求测试模型连通性 |
+| PUT | /ai/config | 启用/关闭、模型、隐私级别、每日 token 上限；Base URL 仅允许 https 或本机 http |
+| PUT | /ai/key | 设置/清除 API Key；需访问密码或本机请求 |
+
+`/ai/chat` 返回中的 `cards` 是服务端根据工具结果生成的数据卡片；`actions` 是待确认写操作（含 `confirm_token`，只给浏览器，不进入模型上下文）；`tool_calls` 是查询轨迹。写操作必须先由用户确认，确认接口才会调用现有业务服务写库。
+
 ## 系统
 | 方法 | 路径 | 说明 |
 |---|---|---|

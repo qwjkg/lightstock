@@ -26,6 +26,75 @@
       <el-alert type="info" :closable="false" title="使用提示" description="本系统数据保存在 server/data/warehouse.db 单文件中，复制该文件即可整体备份；如需局域网/手机访问，直接在同一网络下用手机浏览器打开电脑 IP（服务启动时会显示）。" />
     </el-tab-pane>
 
+    <el-tab-pane label="AI 助手" name="ai">
+      <el-form label-width="150px" style="max-width:620px">
+        <el-form-item label="启用 AI 助手">
+          <el-switch v-model="aiForm.enabled" />
+          <span class="tip" style="margin-left:8px">关闭后右下角 AI 面板不可用，主系统不受影响</span>
+        </el-form-item>
+        <el-form-item label="模型">
+          <el-input v-model="aiForm.model" placeholder="deepseek-chat" />
+          <div class="tip">默认 DeepSeek；也兼容其他 OpenAI 格式的模型名</div>
+        </el-form-item>
+        <el-form-item label="API Key">
+          <el-input
+            v-model="aiForm.key"
+            type="password"
+            show-password
+            :placeholder="aiStatus.configured ? `已配置（${aiStatus.key_hint || '****'}），留空不修改` : 'sk-...'"
+          />
+          <div class="tip">
+            Key 保存在服务端独立文件，不写入数据库备份。
+            <template v-if="aiStatus.key_source === 'env'">当前由环境变量提供，设置页修改不会覆盖环境变量。</template>
+            <template v-else>仅本机或验证访问密码后可修改。</template>
+          </div>
+        </el-form-item>
+        <el-form-item v-if="passwordRequired" label="访问密码">
+          <el-input v-model="aiKeyPassword" type="password" show-password placeholder="修改 Key 时需要验证访问密码" />
+        </el-form-item>
+        <el-form-item label="数据隐私">
+          <el-select v-model="aiForm.privacy" style="width:100%">
+            <el-option label="业务明细（默认）：发商品和单据，联系方式脱敏" value="business" />
+            <el-option label="仅聚合：只发总额/数量（P1 开放）" value="aggregate" disabled />
+            <el-option label="全量：包含全部可见字段（P1 开放）" value="full" disabled />
+          </el-select>
+          <div class="tip">AI 会看到商品名、单据明细和备注；手机号会自动遮罩，但备注里的地址等文本不会自动清除，敏感信息请先删掉。</div>
+        </el-form-item>
+        <el-form-item label="每日 Token 上限">
+          <el-input-number v-model="aiForm.daily_token_budget" :min="0" :step="50000" :controls="false" style="width:200px" />
+          <span class="tip" style="margin-left:8px">0 表示不限；超过后当天停止使用，防止意外消耗</span>
+        </el-form-item>
+        <el-form-item>
+          <el-button type="primary" @click="saveAi">保存 AI 设置</el-button>
+          <el-button :loading="aiTesting" @click="testAi">测试连接</el-button>
+          <el-button v-if="aiStatus.configured && aiStatus.key_source === 'file'" size="default" type="danger" plain @click="clearAiKey">清除 Key</el-button>
+          <span class="tip" v-if="aiStatus.model">当前模型：{{ aiStatus.model }} · {{ aiStatus.configured ? 'Key 已配置' : '未配置 Key' }}</span>
+        </el-form-item>
+        <el-form-item label="权限说明">
+          <span class="tip">AI 默认只读；可授权 15 分钟「可记账」；作废/改单需 5 分钟「高风险」，必须先设置访问密码并输入确认词。每次写入仍需在卡片上确认。</span>
+        </el-form-item>
+      </el-form>
+
+      <div class="toolbar" style="margin-top:4px">
+        <b style="font-size:14px">AI 操作记录</b>
+        <el-button size="small" @click="loadAiAudit">刷新</el-button>
+        <span class="tip">记录每次查询和写操作（当前只读，只会出现查询记录）</span>
+      </div>
+      <el-table :data="aiAudit" size="small" border max-height="320">
+        <template #empty><el-empty :image-size="60" description="还没有 AI 操作记录" /></template>
+        <el-table-column prop="created_at" label="时间" width="150" />
+        <el-table-column label="类型" width="70">
+          <template #default="{ row }">{{ aiKindText(row.kind) }}</template>
+        </el-table-column>
+        <el-table-column prop="tool_name" label="工具" width="140" />
+        <el-table-column label="权限" width="70">
+          <template #default="{ row }">{{ row.permission_level === 'read' ? '只读' : row.permission_level === 'write' ? '可记账' : row.permission_level }}</template>
+        </el-table-column>
+        <el-table-column prop="result_summary" label="结果" show-overflow-tooltip />
+        <el-table-column prop="error" label="错误" show-overflow-tooltip />
+      </el-table>
+    </el-tab-pane>
+
     <!-- 仓库：简易模式下收进设置页，高级模式仍保留独立菜单 -->
     <el-tab-pane v-if="isSimple" label="仓库" name="warehouse">
       <Warehouses />
@@ -143,6 +212,7 @@
 
 <script setup>
 import { onMounted, reactive, ref, watch } from 'vue';
+import { useRoute } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import * as XLSX from 'xlsx';
 import api, { downloadFile } from '../api';
@@ -151,6 +221,7 @@ import { isSimple, mode, hasDemo, switchMode, setBusinessName } from '../mode';
 import Warehouses from './Warehouses.vue';
 
 const tab = ref('base');
+const route = useRoute();
 const form = reactive({ business_name: '', auto_backup_hours: 6, access_password: '' });
 const passwordDirty = ref(false);
 const clearPassword = ref(false);
@@ -171,6 +242,73 @@ const optionsText = ref('');
 const fieldForm = reactive({ id: null, entity: 'product', name: '', label: '', field_type: 'text', options: [], required: false });
 const backups = ref([]);
 const backupLoading = ref(false);
+
+// ---------- AI 助手 ----------
+const aiStatus = ref({});
+const aiAudit = ref([]);
+const aiTesting = ref(false);
+const aiKeyPassword = ref('');
+const aiForm = reactive({ enabled: true, model: 'deepseek-chat', privacy: 'business', daily_token_budget: 200000, key: '' });
+
+async function loadAi() {
+  try {
+    aiStatus.value = await api.get('/ai/status');
+    aiForm.enabled = !!aiStatus.value.enabled;
+    aiForm.model = aiStatus.value.model || 'deepseek-chat';
+    aiForm.privacy = aiStatus.value.privacy || 'business';
+    aiForm.daily_token_budget = Number(aiStatus.value.daily_token_budget) || 0;
+  } catch { /* AI 未配置时不影响设置页其他功能 */ }
+}
+async function loadAiAudit() {
+  try { aiAudit.value = await api.get('/ai/audit', { params: { limit: 30 } }); }
+  catch { /* ignore */ }
+}
+async function saveAi() {
+  try {
+    await api.put('/ai/config', {
+      enabled: aiForm.enabled,
+      model: aiForm.model,
+      privacy: aiForm.privacy,
+      daily_token_budget: aiForm.daily_token_budget
+    });
+    if (aiForm.key.trim()) {
+      await api.put('/ai/key', {
+        key: aiForm.key.trim(),
+        password: aiKeyPassword.value || undefined
+      });
+      aiForm.key = '';
+      aiKeyPassword.value = '';
+    }
+    await loadAi();
+    await loadAiAudit();
+    ElMessage.success('AI 设置已保存');
+  } catch (e) {
+    showError(e, '保存 AI 设置失败');
+  }
+}
+async function testAi() {
+  aiTesting.value = true;
+  try {
+    const r = await api.post('/ai/test');
+    ElMessage.success(`连接正常：${r.reply || r.model || 'OK'}`);
+  } catch (e) {
+    showError(e, 'AI 连接失败');
+  } finally {
+    aiTesting.value = false;
+  }
+}
+async function clearAiKey() {
+  try {
+    await ElMessageBox.confirm('确定清除已保存的 API Key 吗？清除后 AI 助手会停止工作，直到重新填写。', '清除 Key', { type: 'warning' });
+  } catch { return; }
+  try {
+    aiStatus.value = await api.put('/ai/key', { key: '', password: aiKeyPassword.value || undefined });
+    aiKeyPassword.value = '';
+    ElMessage.success('已清除 API Key');
+  } catch (e) {
+    showError(e, '清除失败');
+  }
+}
 
 async function loadBase() {
   const s = await api.get('/settings');
@@ -217,6 +355,7 @@ async function removeField(row) {
   await api.delete('/custom-fields/' + row.id);
   ElMessage.success('已删除'); loadFields();
 }
+function aiKindText(k) { return { chat: '对话', tool: '查询', action: '操作' }[k] || k; }
 function fieldTypeText(t) { return { text: '文本', number: '数字', date: '日期', select: '下拉选项' }[t] || t; }
 
 async function backupNow() {
@@ -278,7 +417,10 @@ async function importProducts(file) {
   return false;
 }
 
-onMounted(() => { loadBase(); loadFields(); loadBackups(); });
+onMounted(() => {
+  if (route.query.tab === 'ai') tab.value = 'ai';
+  loadBase(); loadFields(); loadBackups(); loadAi(); loadAiAudit();
+});
 
 // 模式切换：立即生效并持久化。若正停留在会被隐藏的页签上，先退回「基本设置」，
 // 否则页签被移除后内容区会空掉。
@@ -292,6 +434,7 @@ watch(uiMode, async v => {
     ElMessage.error('切换失败：' + (e.response?.data?.error || e.message));
   }
 });
+watch(() => route.query.tab, v => { if (v === 'ai') tab.value = 'ai'; });
 watch(mode, v => { if (uiMode.value !== v) uiMode.value = v; });
 
 async function clearDemo() {

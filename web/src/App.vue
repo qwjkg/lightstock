@@ -24,6 +24,8 @@
   </el-container>
   <!-- 引导在两个布局下都要能出现，所以放在外壳之外 -->
   <OnboardingWizard v-if="settingsLoaded && !onboarded && route.path !== '/login'" />
+  <!-- AI 助手：电脑端右下角悬浮按钮；手机端由 MobileShell 顶部按钮打开 -->
+  <AiAssistant v-if="route.path !== '/login'" :mobile="isMobileLayout" />
 </template>
 
 <script setup>
@@ -32,6 +34,7 @@ import { useRoute } from 'vue-router';
 import router from './router';
 import { isSimple, businessName, onboarded, settingsLoaded, loadSettings } from './mode';
 import OnboardingWizard from './components/OnboardingWizard.vue';
+import AiAssistant from './components/AiAssistant.vue';
 
 const route = useRoute();
 
